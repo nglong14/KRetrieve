@@ -13,6 +13,8 @@ option(KRETRIEVE_ASAN "Build with AddressSanitizer + UBSan" OFF)
 option(KRETRIEVE_TSAN "Build with ThreadSanitizer" OFF)
 
 add_library(kretrieve_core
+  src/corpus.cpp
+  src/index.cpp
   src/protocol.cpp
   src/tokenizer.cpp)
 target_include_directories(kretrieve_core PUBLIC src)
@@ -40,6 +42,8 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(kretrieve_tests
+    tests/corpus_test.cpp
+    tests/index_test.cpp
     tests/protocol_test.cpp
     tests/tokenizer_test.cpp)
   target_link_libraries(kretrieve_tests PRIVATE kretrieve_core GTest::gtest_main)
