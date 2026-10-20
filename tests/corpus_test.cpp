@@ -67,6 +67,16 @@ TEST(Corpus, RejectsEmptyInputAndReadErrors) {
   EXPECT_THROW(load_corpus(failbit), std::runtime_error);
 }
 
+TEST(Corpus, AllowsEmptyPartitionsWithoutRelaxingValidation) {
+  std::istringstream empty;
+  EXPECT_TRUE(load_corpus(empty, /*allow_empty=*/true).empty());
+  std::istringstream blank("\n");
+  EXPECT_THROW(load_corpus(blank, /*allow_empty=*/true), std::runtime_error);
+  std::istringstream failed;
+  failed.setstate(std::ios::badbit);
+  EXPECT_THROW(load_corpus(failed, /*allow_empty=*/true), std::runtime_error);
+}
+
 TEST(GlobalStats, MatchesReferenceCorpus) {
   const std::vector<Document> documents = {
       {10, "cat cat dog"}, {20, "dog bird"}, {30, "cat bird bird"}};

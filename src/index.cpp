@@ -14,16 +14,9 @@ InvertedIndex::InvertedIndex(std::span<const Document> documents,
                              GlobalStats global_stats)
     : global_stats_(std::move(global_stats)) {
   const auto& stats = global_stats_;
-  if (stats.document_count == 0 || documents.size() > stats.document_count ||
-      !std::isfinite(stats.average_document_length) ||
-      stats.average_document_length < 0 ||
-      ((stats.average_document_length == 0) != stats.document_frequency.empty())) {
-    throw std::invalid_argument("invalid global document count or average length");
-  }
-  for (const auto& [term, df] : stats.document_frequency) {
-    if (term.empty() || df == 0 || df > stats.document_count) {
-      throw std::invalid_argument("invalid global document frequency");
-    }
+  validate_global_stats(stats);
+  if (documents.size() > stats.document_count) {
+    throw std::invalid_argument("local document count exceeds global count");
   }
 
   document_ids_.reserve(documents.size());
