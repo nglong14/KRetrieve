@@ -13,6 +13,9 @@ option(KRETRIEVE_ASAN "Build with AddressSanitizer + UBSan" OFF)
 option(KRETRIEVE_TSAN "Build with ThreadSanitizer" OFF)
 
 add_library(kretrieve_core
+  src/corpus.cpp
+  src/index.cpp
+  src/prepare.cpp
   src/protocol.cpp
   src/tokenizer.cpp)
 target_include_directories(kretrieve_core PUBLIC src)
@@ -40,10 +43,20 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(kretrieve_tests
+    tests/corpus_test.cpp
+    tests/index_test.cpp
+    tests/prepare_test.cpp
     tests/protocol_test.cpp
     tests/tokenizer_test.cpp)
   target_link_libraries(kretrieve_tests PRIVATE kretrieve_core GTest::gtest_main)
+  target_compile_definitions(kretrieve_tests PRIVATE
+    KRETRIEVE_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
   include(GoogleTest)
   gtest_discover_tests(kretrieve_tests)
+  add_test(NAME PrepareCli
+    COMMAND ${CMAKE_COMMAND}
+      "-DKRETRIEVE=$<TARGET_FILE:kretrieve>"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/prepare_cli_test.cmake")
 endif()
