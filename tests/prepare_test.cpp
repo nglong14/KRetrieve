@@ -76,6 +76,7 @@ TEST_F(PrepareTest, StatisticsEncodingIsLittleEndianAndStable) {
   const GlobalStats stats{1, 1.0, {{"cat", 1}}};
   const auto path = root / "stats.bin";
   write_global_stats(path, stats);
+  // clang-format off: keep the binary fields on separate rows.
   const std::vector<uint8_t> expected = {
       'K', 'R', 'S', 'T',
       1, 0, 0, 0,                    // version
@@ -84,6 +85,7 @@ TEST_F(PrepareTest, StatisticsEncodingIsLittleEndianAndStable) {
       1, 0, 0, 0, 0, 0, 0, 0,        // vocabulary size
       3, 0, 0, 0, 'c', 'a', 't',      // term length + bytes
       1, 0, 0, 0, 0, 0, 0, 0};       // DF
+  // clang-format on
   EXPECT_EQ(read(path), std::string(expected.begin(), expected.end()));
 }
 
@@ -221,8 +223,7 @@ TEST_F(PrepareTest, PartitionsDeterministicallyAndPreservesDocuments) {
     EXPECT_EQ(stats.document_frequency.at("bird"), 2u);
   }
   prepare_corpus(input, root / "repeat", 3);
-  for (const std::string name : {"global_stats.bin", "shard-0.tsv", "shard-1.tsv",
-                                 "shard-2.tsv"}) {
+  for (const std::string name : {"global_stats.bin", "shard-0.tsv", "shard-1.tsv", "shard-2.tsv"}) {
     EXPECT_EQ(read(root / "prepared-3" / name), read(root / "repeat" / name));
   }
 }
@@ -262,8 +263,9 @@ TEST_F(PrepareTest, RefusesExistingOutputWithoutOverwriting) {
 
 TEST_F(PrepareTest, DiskToSearchMatchesFullCorpusAcrossShardCounts) {
   const auto input = root / "corpus.tsv";
-  write(input, "11\tcat cat dog\n10\tcat cat dog\n20\tdog bird\n"
-               "30\tcat bird bird\n40\trare\n50\t\n60\tthe and\n");
+  write(input,
+        "11\tcat cat dog\n10\tcat cat dog\n20\tdog bird\n"
+        "30\tcat bird bird\n40\trare\n50\t\n60\tthe and\n");
   std::ifstream source(input);
   const auto documents = load_corpus(source);
   const InvertedIndex full(documents, compute_global_stats(documents));
@@ -278,8 +280,8 @@ TEST_F(PrepareTest, DiskToSearchMatchesFullCorpusAcrossShardCounts) {
       ASSERT_TRUE(partition);
       indexes.emplace_back(load_corpus(partition, /*allow_empty=*/true), stats);
     }
-    for (const std::string query : {"cat dog", "rare cat", "bird dog", "cat cat",
-                                    "the and", "unknown", ""}) {
+    for (const std::string query :
+         {"cat dog", "rare cat", "bird dog", "cat cat", "the and", "unknown", ""}) {
       SCOPED_TRACE(query);
       for (const size_t k : {0u, 1u, 2u, 3u, 20u}) {
         SCOPED_TRACE(k);

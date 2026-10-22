@@ -10,8 +10,7 @@
 
 namespace kretrieve {
 
-InvertedIndex::InvertedIndex(std::span<const Document> documents,
-                             GlobalStats global_stats)
+InvertedIndex::InvertedIndex(std::span<const Document> documents, GlobalStats global_stats)
     : global_stats_(std::move(global_stats)) {
   const auto& stats = global_stats_;
   validate_global_stats(stats);
@@ -65,9 +64,8 @@ std::vector<SearchHit> InvertedIndex::search(std::string_view query, size_t k) c
     const auto list = postings(term);
     if (list.empty()) continue;
     const uint64_t df = global_stats_.document_frequency.at(term);
-    const double idf = std::log1p(
-        (static_cast<double>(global_stats_.document_count - df) + 0.5) /
-        (static_cast<double>(df) + 0.5));
+    const double idf = std::log1p((static_cast<double>(global_stats_.document_count - df) + 0.5) /
+                                  (static_cast<double>(df) + 0.5));
     for (const auto& posting : list) {
       const double tf = static_cast<double>(posting.term_frequency);
       const double length = static_cast<double>(document_lengths_[posting.document_index]);

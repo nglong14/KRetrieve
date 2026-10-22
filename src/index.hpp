@@ -25,7 +25,6 @@ struct SearchHit {
 
 class InvertedIndex {
  public:
-
   InvertedIndex(std::span<const Document> documents, GlobalStats global_stats);
 
   // Accessors
