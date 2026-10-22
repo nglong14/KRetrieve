@@ -20,8 +20,7 @@ void put_u64(uint8_t* p, uint64_t v) {
 }
 
 uint32_t get_u32(const uint8_t* p) {
-  return uint32_t{p[0]} | (uint32_t{p[1]} << 8) | (uint32_t{p[2]} << 16) |
-         (uint32_t{p[3]} << 24);
+  return uint32_t{p[0]} | (uint32_t{p[1]} << 8) | (uint32_t{p[2]} << 16) | (uint32_t{p[3]} << 24);
 }
 
 uint64_t get_u64(const uint8_t* p) {
@@ -44,8 +43,7 @@ std::vector<uint8_t> encode_frame(const Frame& frame) {
   meta[0] = kProtocolVersion;
   meta[1] = static_cast<uint8_t>(frame.type);
   put_u64(meta + 2, frame.req_id);
-  std::copy(frame.body.begin(), frame.body.end(),
-            out.begin() + kFramePrefixSize + kFrameMetaSize);
+  std::copy(frame.body.begin(), frame.body.end(), out.begin() + kFramePrefixSize + kFrameMetaSize);
   return out;
 }
 

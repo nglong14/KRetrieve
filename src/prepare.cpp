@@ -19,8 +19,7 @@ namespace {
 // [u32 term_length][term bytes][u64 document_frequency]
 constexpr std::string_view kStatsMagic = "KRST";
 constexpr uint32_t kStatsVersion = 1;
-static_assert(sizeof(double) == sizeof(uint64_t) &&
-              std::numeric_limits<double>::is_iec559);
+static_assert(sizeof(double) == sizeof(uint64_t) && std::numeric_limits<double>::is_iec559);
 
 void append_integer(std::vector<uint8_t>& bytes, uint64_t value, size_t width) {
   for (size_t i = 0; i < width; ++i) {
@@ -47,8 +46,7 @@ std::vector<uint8_t> read_file(const std::filesystem::path& path) {
   // Bound allocations by actual file size, never by lengths from its header.
   std::vector<uint8_t> bytes(static_cast<size_t>(size));
   if (!bytes.empty()) {
-    input.read(reinterpret_cast<char*>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
   }
   if (!input) throw std::runtime_error("cannot read statistics file: " + path.string());
   return bytes;
@@ -113,8 +111,7 @@ GlobalStats read_global_stats(const std::filesystem::path& path) {
     if (length == 0 || bytes.size() < 8 || length > bytes.size() - 8) {
       throw std::runtime_error("invalid global statistics term length");
     }
-    std::string term(reinterpret_cast<const char*>(bytes.data()),
-                     static_cast<size_t>(length));
+    std::string term(reinterpret_cast<const char*>(bytes.data()), static_cast<size_t>(length));
     bytes = bytes.subspan(static_cast<size_t>(length));
     const uint64_t df = read_integer(bytes, 8);
     if (!stats.document_frequency.emplace(std::move(term), df).second) {
@@ -130,8 +127,8 @@ GlobalStats read_global_stats(const std::filesystem::path& path) {
   return stats;
 }
 
-void prepare_corpus(const std::filesystem::path& input,
-                    const std::filesystem::path& output, size_t shard_count) {
+void prepare_corpus(const std::filesystem::path& input, const std::filesystem::path& output,
+                    size_t shard_count) {
   if (shard_count == 0) throw std::invalid_argument("shard count must be positive");
   std::ifstream source(input, std::ios::binary);
   if (!source) throw std::runtime_error("cannot open corpus: " + input.string());

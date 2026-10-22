@@ -41,6 +41,7 @@ TEST(FrameCodec, WireFormatIsLittleEndianAndStable) {
   in.req_id = 1;
   in.body = {0xaa};
 
+  // clang-format off: keep the wire fields on separate rows.
   const std::vector<uint8_t> expected = {
       0x0b, 0x00, 0x00, 0x00,  // len = 10 + 1
       0x01,                    // version
@@ -48,6 +49,7 @@ TEST(FrameCodec, WireFormatIsLittleEndianAndStable) {
       0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // req_id = 1
       0xaa,                    // body
   };
+  // clang-format on
   EXPECT_EQ(encode_frame(in), expected);
 }
 
@@ -70,8 +72,7 @@ TEST(FrameCodec, DecodesTwoFramesFromOneBuffer) {
   EXPECT_EQ(first_out.consumed, first_out.frame.body.size() + kFramePrefixSize + kFrameMetaSize);
   EXPECT_EQ(first_out.frame.req_id, 7u);
 
-  const auto second_out = decode_frame(
-      std::span<const uint8_t>(wire).subspan(first_out.consumed));
+  const auto second_out = decode_frame(std::span<const uint8_t>(wire).subspan(first_out.consumed));
   ASSERT_EQ(second_out.status, DecodeStatus::Ok);
   EXPECT_EQ(second_out.frame.req_id, 8u);
   EXPECT_EQ(second_out.frame.body, std::vector<uint8_t>({4}));

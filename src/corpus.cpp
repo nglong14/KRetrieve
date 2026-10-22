@@ -18,8 +18,7 @@ std::vector<Document> load_corpus(std::istream& input, bool allow_empty) {
     ++line_number;
     if (!line.empty() && line.back() == '\r') line.pop_back();
     const auto fail = [line_number](const char* reason) {
-      throw std::runtime_error("corpus line " + std::to_string(line_number) +
-                               ": " + reason);
+      throw std::runtime_error("corpus line " + std::to_string(line_number) + ": " + reason);
     };
     const size_t separator = line.find('\t');
     if (separator == std::string::npos) fail("missing tab separator");
@@ -34,8 +33,7 @@ std::vector<Document> load_corpus(std::istream& input, bool allow_empty) {
     documents.push_back({id, line.substr(separator + 1)});
   }
   if (input.bad() || (input.fail() && !input.eof())) {
-    throw std::runtime_error("corpus read failed after line " +
-                             std::to_string(line_number));
+    throw std::runtime_error("corpus read failed after line " + std::to_string(line_number));
   }
   if (documents.empty() && !allow_empty) {
     throw std::runtime_error("corpus contains no documents");
@@ -65,8 +63,7 @@ GlobalStats compute_global_stats(std::span<const Document> documents) {
 }
 
 void validate_global_stats(const GlobalStats& stats) {
-  if (stats.document_count == 0 ||
-      !std::isfinite(stats.average_document_length) ||
+  if (stats.document_count == 0 || !std::isfinite(stats.average_document_length) ||
       stats.average_document_length < 0 ||
       ((stats.average_document_length == 0) != stats.document_frequency.empty())) {
     throw std::invalid_argument("invalid global document count or average length");

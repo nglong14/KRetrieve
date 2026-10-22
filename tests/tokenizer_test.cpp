@@ -19,13 +19,10 @@ TEST(Tokenizer, EmptyAndPunctuationOnly) {
   EXPECT_TRUE(tokenize("  -- ... !!  ").empty());
 }
 
-TEST(Tokenizer, StopwordsOnly) {
-  EXPECT_TRUE(tokenize("a the and of is it to").empty());
-}
+TEST(Tokenizer, StopwordsOnly) { EXPECT_TRUE(tokenize("a the and of is it to").empty()); }
 
 TEST(Tokenizer, CollapsesSeparatorsAndTrims) {
-  EXPECT_EQ(tokenize("  --hello__world--  "),
-            std::vector<std::string>({"hello", "world"}));
+  EXPECT_EQ(tokenize("  --hello__world--  "), std::vector<std::string>({"hello", "world"}));
 }
 
 TEST(Tokenizer, ApostropheSplits) {

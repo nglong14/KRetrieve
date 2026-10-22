@@ -10,13 +10,11 @@ namespace {
 
 const std::unordered_set<std::string_view>& stopwords() {
   static const std::unordered_set<std::string_view> words = {
-      "a",     "an",   "and",  "are",  "as",   "at",   "be",   "but",
-      "by",    "for",  "from", "had",  "has",  "have", "he",   "her",
-      "his",   "i",    "if",   "in",   "into", "is",   "it",   "its",
-      "me",    "my",   "no",   "not",  "of",   "on",   "or",   "our",
-      "she",   "so",   "that", "the",  "their", "them", "they", "this",
-      "to",    "was",  "we",   "were", "what", "when", "which", "who",
-      "will",  "with", "you",  "your",
+      "a",    "an",   "and",   "are",   "as",   "at",   "be",   "but",  "by",  "for",  "from",
+      "had",  "has",  "have",  "he",    "her",  "his",  "i",    "if",   "in",  "into", "is",
+      "it",   "its",  "me",    "my",    "no",   "not",  "of",   "on",   "or",  "our",  "she",
+      "so",   "that", "the",   "their", "them", "they", "this", "to",   "was", "we",   "were",
+      "what", "when", "which", "who",   "will", "with", "you",  "your",
   };
   return words;
 }

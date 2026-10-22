@@ -32,9 +32,8 @@ TEST(Corpus, AcceptsCrLfAndFullUnsignedIdRange) {
 }
 
 TEST(Corpus, RejectsMalformedRecordsWithLineNumber) {
-  for (const std::string record : {"", "missing tab", "\tcat", "-1\tcat",
-                                  "+1\tcat", " 1\tcat", "1 \tcat", "1x\tcat",
-                                  "18446744073709551616\tcat"}) {
+  for (const std::string record : {"", "missing tab", "\tcat", "-1\tcat", "+1\tcat", " 1\tcat",
+                                   "1 \tcat", "1x\tcat", "18446744073709551616\tcat"}) {
     SCOPED_TRACE(record);
     std::istringstream input("10\tvalid\n" + record + "\n");
     try {
@@ -90,8 +89,7 @@ TEST(GlobalStats, MatchesReferenceCorpus) {
 }
 
 TEST(GlobalStats, UsesTokenizerAndCountsEmptyDocuments) {
-  const std::vector<Document> documents = {
-      {1, "The CAT, cat! BM25"}, {2, ""}, {3, "and the of"}};
+  const std::vector<Document> documents = {{1, "The CAT, cat! BM25"}, {2, ""}, {3, "and the of"}};
   const auto stats = compute_global_stats(documents);
   EXPECT_EQ(stats.document_count, 3u);
   EXPECT_DOUBLE_EQ(stats.average_document_length, 1.0);
