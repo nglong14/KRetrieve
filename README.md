@@ -3,8 +3,8 @@
 [![CI](https://github.com/nglong14/KRetrieve/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nglong14/KRetrieve/actions/workflows/ci.yml)
 
 A C++20 sharded BM25 retrieval engine in progress. Day 1 provides offline corpus
-preparation and immutable, in-process search. TCP shard serving and the
-scatter-gather coordinator are not implemented yet.
+preparation and immutable, in-process search. Day 2 serves one partition over
+TCP. The scatter-gather coordinator is not implemented yet.
 
 ## Build and test
 
@@ -26,7 +26,8 @@ ctest --test-dir build-asan --output-on-failure
 ```
 
 `-DKRETRIEVE_TSAN=ON` is also available in a separate build; it cannot be combined
-with `KRETRIEVE_ASAN`. Day 1 does not add concurrent execution.
+with `KRETRIEVE_ASAN`. The shard server is multithreaded, so run the TSan build
+locally after touching it; CI does not run TSan yet.
 
 ## Formatting and static analysis
 
@@ -276,6 +277,63 @@ The reader rejects bad magic/version, truncation, invalid lengths, duplicate
 terms, trailing bytes, nonfinite/negative average lengths, inconsistent empty
 vocabularies, zero document counts, and document frequencies outside `1..N`.
 Encoded lengths are checked against the remaining file data before allocation.
+
+## Serve a shard
+
+```bash
+./build/kretrieve prepare --input corpus.tsv --output prepared --shards 1
+./build/kretrieve shard --stats prepared/global_stats.bin \
+  --partition prepared/shard-0.tsv --port 0
+# listening on 127.0.0.1:41237
+./build/kretrieve query --port 41237 --k 10 --query "cat dog"
+# 1	10	1.071445295349
+# 2	20	0.523548346502
+# 3	30	0.447138587823
+```
+
+`--port 0` picks a free port and prints it. `--host` defaults to `127.0.0.1`.
+SIGINT/SIGTERM stop accepting, close client connections, join all workers, and
+exit 0. Queued requests are dropped; already executing searches finish before exit.
+
+**The shard has no authentication or encryption.** Keep it on loopback or a
+trusted network.
+
+The Linux server uses one level-triggered epoll event loop for nonblocking socket
+I/O and a fixed query worker pool. `--workers N` sets the pool size; by default it
+is the CPU count (at least one), capped at `--max-connections` (default 64).
+Workers share the immutable index without locks and never access client sockets.
+Idle clients and slow readers do not occupy a worker.
+
+Connections are persistent and handle one request at a time, in order, including
+pipelined requests. Reading pauses until the current response has been written.
+Admitted jobs (queued, executing, or awaiting completion delivery) are bounded by
+the connection cap; additional complete requests wait in FIFO order without
+blocking the I/O loop. Each connection holds at most one request or response,
+so memory scales with the connection cap and the 16 MiB maximum frame body.
+Extra connections are accepted and closed immediately. Descriptor exhaustion
+temporarily pauses accepting while existing connections continue to be served.
+
+There is no idle timeout or search cancellation yet. An idle client holds its
+connection slot until it disconnects; a disconnect during query execution is
+observed when the response is ready. The `query` CLI still uses blocking I/O.
+
+### Message bodies
+
+Both bodies use the frame format in `protocol.hpp`
+(`[u32 len][u8 version][u8 type][u64 req_id][body]`), little-endian. The
+response echoes the request's `req_id`.
+
+| Message | Body |
+|---|---|
+| `QueryRequest` (type 1) | `u32 k` (≤ 100000), `u64 budget_us`, `u32 query_len`, query bytes |
+| `QueryResponse` (type 2) | `u8 status`, `u32 hit_count`, then per hit `u64 doc_id`, `f64 score` |
+
+Status is `0` Ok, `1` BadRequest, `2` InternalError. Hits follow the ranking
+contract above. `budget_us` is carried but ignored until deadlines land (day 4).
+
+A well-framed request with a malformed body gets `BadRequest`, and the
+connection stays open. An invalid frame (bad length, version, or type) or a
+client-sent `QueryResponse` closes the connection.
 
 ## Non-goals
 

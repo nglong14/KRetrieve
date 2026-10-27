@@ -15,9 +15,13 @@ option(KRETRIEVE_TSAN "Build with ThreadSanitizer" OFF)
 add_library(kretrieve_core
   src/corpus.cpp
   src/index.cpp
+  src/net.cpp
   src/prepare.cpp
   src/protocol.cpp
+  src/shard_server.cpp
   src/tokenizer.cpp)
+find_package(Threads REQUIRED)
+target_link_libraries(kretrieve_core PUBLIC Threads::Threads)
 target_include_directories(kretrieve_core PUBLIC src)
 target_compile_options(kretrieve_core PUBLIC -Wall -Wextra -Wpedantic)
 
@@ -48,16 +52,21 @@ if(BUILD_TESTING)
     tests/index_test.cpp
     tests/prepare_test.cpp
     tests/protocol_test.cpp
+    tests/shard_server_test.cpp
     tests/tokenizer_test.cpp)
   target_link_libraries(kretrieve_tests PRIVATE kretrieve_core GTest::gtest_main)
   target_compile_definitions(kretrieve_tests PRIVATE
     KRETRIEVE_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
   include(GoogleTest)
-  gtest_discover_tests(kretrieve_tests)
+  gtest_discover_tests(kretrieve_tests PROPERTIES TIMEOUT 60)
   add_test(NAME PrepareCli
     COMMAND ${CMAKE_COMMAND}
       "-DKRETRIEVE=$<TARGET_FILE:kretrieve>"
       "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/prepare_cli_test.cmake")
+  add_test(NAME ShardCli
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/shard_cli_test.sh"
+      $<TARGET_FILE:kretrieve> "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(PrepareCli ShardCli PROPERTIES TIMEOUT 60)
 endif()

@@ -178,6 +178,7 @@ jobs:
             "-DKRETRIEVE=$smoke/kretrieve-${VERSION}-linux-x86_64/kretrieve" \
             "-DTEST_ROOT=$smoke" \
             -P tests/prepare_cli_test.cmake
+          bash tests/shard_cli_test.sh "$smoke/kretrieve-${VERSION}-linux-x86_64/kretrieve" "$smoke"
       - name: Publish release without replacing existing versions
         env:
           GH_TOKEN: ${{ github.token }}

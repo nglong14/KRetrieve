@@ -2,6 +2,7 @@
 #include "protocol.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <utility>
 
 namespace kretrieve {
@@ -64,6 +65,62 @@ DecodeResult decode_frame(std::span<const uint8_t> data) {
   frame.body.assign(meta + kFrameMetaSize, meta + len);
 
   return {DecodeStatus::Ok, std::move(frame), kFramePrefixSize + len};
+}
+
+constexpr size_t kRequestHeaderSize = 4 + 8 + 4;
+constexpr size_t kResponseHeaderSize = 1 + 4;
+constexpr size_t kHitSize = 8 + 8;
+
+std::vector<uint8_t> encode_request(const QueryRequest& request) {
+  std::vector<uint8_t> out(kRequestHeaderSize + request.query.size());
+  put_u32(out.data(), request.k);
+  put_u64(out.data() + 4, request.budget_us);
+  put_u32(out.data() + 12, static_cast<uint32_t>(request.query.size()));
+  std::copy(request.query.begin(), request.query.end(), out.begin() + kRequestHeaderSize);
+  return out;
+}
+
+std::optional<QueryRequest> decode_request(std::span<const uint8_t> body) {
+  if (body.size() < kRequestHeaderSize) return std::nullopt;
+  QueryRequest request;
+  request.k = get_u32(body.data());
+  request.budget_us = get_u64(body.data() + 4);
+  const uint32_t query_len = get_u32(body.data() + 12);
+  if (request.k > kMaxK || query_len != body.size() - kRequestHeaderSize) return std::nullopt;
+  request.query.assign(body.begin() + kRequestHeaderSize, body.end());
+  return request;
+}
+
+std::vector<uint8_t> encode_response(const QueryResponse& response) {
+  std::vector<uint8_t> out(kResponseHeaderSize + response.hits.size() * kHitSize);
+  out[0] = static_cast<uint8_t>(response.status);
+  put_u32(out.data() + 1, static_cast<uint32_t>(response.hits.size()));
+  uint8_t* p = out.data() + kResponseHeaderSize;
+  for (const auto& hit : response.hits) {
+    put_u64(p, hit.document_id);
+    put_u64(p + 8, std::bit_cast<uint64_t>(hit.score));
+    p += kHitSize;
+  }
+  return out;
+}
+
+std::optional<QueryResponse> decode_response(std::span<const uint8_t> body) {
+  if (body.size() < kResponseHeaderSize) return std::nullopt;
+  if (body[0] > static_cast<uint8_t>(ResponseStatus::InternalError)) return std::nullopt;
+  const uint32_t count = get_u32(body.data() + 1);
+  if (count > kMaxK || body.size() - kResponseHeaderSize != uint64_t{count} * kHitSize) {
+    return std::nullopt;
+  }
+  QueryResponse response;
+  response.status = static_cast<ResponseStatus>(body[0]);
+  response.hits.resize(count);
+  const uint8_t* p = body.data() + kResponseHeaderSize;
+  for (auto& hit : response.hits) {
+    hit.document_id = get_u64(p);
+    hit.score = std::bit_cast<double>(get_u64(p + 8));
+    p += kHitSize;
+  }
+  return response;
 }
 
 }  // namespace kretrieve
