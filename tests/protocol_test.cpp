@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <bit>
+#include <cstdint>
+
 using namespace kretrieve;
 
 TEST(FrameCodec, RoundTripWithBody) {
@@ -119,4 +122,63 @@ TEST(FrameCodec, RejectsBadHeader) {
   too_large[2] = 0xff;
   too_large[3] = 0x7f;
   EXPECT_EQ(decode_frame(too_large).status, DecodeStatus::Invalid);
+}
+
+TEST(MessageCodec, RequestRoundTripAndWireLayout) {
+  const QueryRequest in{10, 0x0102030405060708ULL, "ab"};
+  // clang-format off
+  const std::vector<uint8_t> expected = {
+      0x0a, 0x00, 0x00, 0x00,                          // k = 10
+      0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,  // budget_us
+      0x02, 0x00, 0x00, 0x00,                          // query_len = 2
+      'a', 'b',
+  };
+  // clang-format on
+  const auto wire = encode_request(in);
+  EXPECT_EQ(wire, expected);
+  const auto out = decode_request(wire);
+  ASSERT_TRUE(out);
+  EXPECT_EQ(out->k, in.k);
+  EXPECT_EQ(out->budget_us, in.budget_us);
+  EXPECT_EQ(out->query, in.query);
+  EXPECT_TRUE(decode_request(encode_request({0, 0, ""})));
+}
+
+TEST(MessageCodec, RejectsMalformedRequests) {
+  const auto wire = encode_request({10, 0, "cat"});
+  EXPECT_FALSE(decode_request(std::span<const uint8_t>(wire).first(wire.size() - 1)));
+  auto trailing = wire;
+  trailing.push_back(0);
+  EXPECT_FALSE(decode_request(trailing));
+  EXPECT_FALSE(decode_request(std::span<const uint8_t>(wire).first(15)));
+  EXPECT_FALSE(decode_request(encode_request({kMaxK + 1, 0, "cat"})));
+}
+
+TEST(MessageCodec, ResponseRoundTripIsBitExact) {
+  const QueryResponse in{ResponseStatus::Ok,
+                         {{10, 1.071445295349}, {UINT64_MAX, 4.9e-324}, {0, -0.0}}};
+  const auto out = decode_response(encode_response(in));
+  ASSERT_TRUE(out);
+  EXPECT_EQ(out->status, ResponseStatus::Ok);
+  ASSERT_EQ(out->hits.size(), in.hits.size());
+  for (size_t i = 0; i < in.hits.size(); ++i) {
+    EXPECT_EQ(out->hits[i].document_id, in.hits[i].document_id);
+    EXPECT_EQ(std::bit_cast<uint64_t>(out->hits[i].score),
+              std::bit_cast<uint64_t>(in.hits[i].score));
+  }
+  const auto error = decode_response(encode_response({ResponseStatus::BadRequest, {}}));
+  ASSERT_TRUE(error);
+  EXPECT_EQ(error->status, ResponseStatus::BadRequest);
+}
+
+TEST(MessageCodec, RejectsMalformedResponses) {
+  const auto wire = encode_response({ResponseStatus::Ok, {{1, 1.0}}});
+  EXPECT_FALSE(decode_response(std::span<const uint8_t>(wire).first(4)));
+  EXPECT_FALSE(decode_response(std::span<const uint8_t>(wire).first(wire.size() - 1)));
+  auto trailing = wire;
+  trailing.push_back(0);
+  EXPECT_FALSE(decode_response(trailing));
+  auto bad_status = wire;
+  bad_status[0] = 3;
+  EXPECT_FALSE(decode_response(bad_status));
 }
