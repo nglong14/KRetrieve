@@ -81,11 +81,7 @@ std::vector<SearchHit> InvertedIndex::search(std::string_view query, size_t k) c
     hits.push_back({document_ids_[index], score});
   }
   const size_t count = std::min(k, hits.size());
-  std::partial_sort(hits.begin(), hits.begin() + count, hits.end(),
-                    [](const SearchHit& a, const SearchHit& b) {
-                      if (a.score != b.score) return a.score > b.score;
-                      return a.document_id < b.document_id;
-                    });
+  std::partial_sort(hits.begin(), hits.begin() + count, hits.end(), ranks_before);
   hits.resize(count);
   return hits;
 }

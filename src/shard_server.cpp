@@ -50,8 +50,8 @@ Fd checked_fd(int fd, const char* operation) {
 // Runtime state is local to run(): unwinding also stops and joins a partially started pool.
 class Reactor {
  public:
-  Reactor(const InvertedIndex& index, Fd listener, int stop_fd, size_t cap)
-      : index_(index),
+  Reactor(const RequestHandler& handler, Fd listener, int stop_fd, size_t cap)
+      : handler_(handler),
         listener_(std::move(listener)),
         epoll_(checked_fd(epoll_create1(EPOLL_CLOEXEC), "epoll_create1")),
         completed_fd_(checked_fd(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC), "eventfd")),
@@ -256,7 +256,7 @@ class Reactor {
       }
       auto& job = current.front();
       try {
-        if (const auto response = handle_request(index_, job.request)) {
+        if (const auto response = handler_(job.request)) {
           job.response = encode_frame(*response);
         }
       } catch (...) {
@@ -302,7 +302,7 @@ class Reactor {
     }
   }
 
-  const InvertedIndex& index_;
+  const RequestHandler& handler_;
   Fd listener_;
   Fd epoll_;
   Fd completed_fd_;
@@ -326,7 +326,12 @@ class Reactor {
 
 ShardServer::ShardServer(const InvertedIndex& index, Fd listener, size_t max_connections,
                          size_t workers)
-    : index_(index),
+    : ShardServer([&index](const Frame& request) { return handle_request(index, request); },
+                  std::move(listener), max_connections, workers) {}
+
+ShardServer::ShardServer(RequestHandler handler, Fd listener, size_t max_connections,
+                         size_t workers)
+    : handler_(std::move(handler)),
       listener_(std::move(listener)),
       max_connections_(max_connections),
       worker_count_(
@@ -351,7 +356,7 @@ void ShardServer::stop() {
 }
 
 void ShardServer::run() {
-  Reactor reactor(index_, std::move(listener_), stop_read_.get(), max_connections_);
+  Reactor reactor(handler_, std::move(listener_), stop_read_.get(), max_connections_);
   reactor.run(worker_count_);
 }
 

@@ -6,6 +6,7 @@
 #include "protocol.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 
 namespace kretrieve {
@@ -14,9 +15,15 @@ namespace kretrieve {
 // connection" (only QueryRequest is accepted). A malformed body yields BadRequest.
 std::optional<Frame> handle_request(const InvertedIndex& index, const Frame& request);
 
+// Called concurrently from worker threads; same nullopt contract as handle_request.
+using RequestHandler = std::function<std::optional<Frame>(const Frame&)>;
+
+// Frame server used by both shards and the coordinator.
 class ShardServer {
  public:
-  // index must outlive the server. workers=0 selects min(connection cap, CPU count).
+  // workers=0 selects min(connection cap, CPU count).
+  ShardServer(RequestHandler handler, Fd listener, size_t max_connections, size_t workers = 0);
+  // index must outlive the server.
   ShardServer(const InvertedIndex& index, Fd listener, size_t max_connections, size_t workers = 0);
   ShardServer(const ShardServer&) = delete;
   ShardServer& operator=(const ShardServer&) = delete;
@@ -27,7 +34,7 @@ class ShardServer {
   void stop();
 
  private:
-  const InvertedIndex& index_;
+  RequestHandler handler_;
   Fd listener_;
   Fd stop_read_;
   Fd stop_write_;

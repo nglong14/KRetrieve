@@ -4,7 +4,7 @@
 
 A C++20 sharded BM25 retrieval engine in progress. Day 1 provides offline corpus
 preparation and immutable, in-process search. Day 2 serves one partition over
-TCP. The scatter-gather coordinator is not implemented yet.
+TCP. Day 3 adds a scatter-gather coordinator in front of the shards.
 
 ## Build and test
 
@@ -256,7 +256,7 @@ Searching the full corpus for `cat dog` produces:
 
 Tests also prepare/load files, search each partition, and merge its top-K in test
 code to verify the same ranking and scores across shard counts, including empty
-partitions and cross-shard ties. This is not a production coordinator yet.
+partitions and cross-shard ties. The coordinator (below) does this merge over TCP.
 
 ### `global_stats.bin` format (version 1)
 
@@ -334,6 +334,37 @@ contract above. `budget_us` is carried but ignored until deadlines land (day 4).
 A well-framed request with a malformed body gets `BadRequest`, and the
 connection stays open. An invalid frame (bad length, version, or type) or a
 client-sent `QueryResponse` closes the connection.
+
+## Run a coordinator
+
+```bash
+./build/kretrieve prepare --input corpus.tsv --output prepared --shards 3
+for s in 0 1 2; do
+  ./build/kretrieve shard --stats prepared/global_stats.bin \
+    --partition prepared/shard-$s.tsv --port $((9000 + s)) &
+done
+./build/kretrieve coordinator --port 8000 \
+  --shards 127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002
+./build/kretrieve query --port 8000 --k 10 --query "cat dog"
+# same output as the single-shard example above
+```
+
+The coordinator speaks the same protocol as a shard, so `query` works against
+either. It reuses the shard's epoll front end (`--host`, `--max-connections`,
+`--workers` mean the same thing). For each query it:
+
+1. assigns its own `req_id` (an atomic counter) and sends it to every shard;
+   a reply with any other `req_id` counts as a failed shard. The client's own
+   `req_id` is echoed back to the client.
+2. fans out through a fixed thread pool of `shards × workers` threads, so a
+   full set of workers never waits for a fan-out thread. Each task opens a new
+   TCP connection, sends the request, and reads the reply.
+3. merges per-shard top-K with a size-K min-heap using the same ranking
+   contract (score desc, document ID asc), so results match an unsharded index.
+
+Any shard failure (connect refused, closed connection, mismatched reply,
+non-Ok status) currently fails the whole query with `InternalError`. Deadlines,
+partial results, and cancellation come next (day 4); shard reads block until then.
 
 ## Non-goals
 
