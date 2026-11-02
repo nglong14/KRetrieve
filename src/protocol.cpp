@@ -48,11 +48,18 @@ std::vector<uint8_t> encode_frame(const Frame& frame) {
   return out;
 }
 
+std::optional<uint32_t> frame_length(std::span<const uint8_t, kFramePrefixSize> prefix) {
+  const uint32_t len = get_u32(prefix.data());
+  if (len < kFrameMetaSize || len > kMaxFrameLen) return std::nullopt;
+  return len;
+}
+
 DecodeResult decode_frame(std::span<const uint8_t> data) {
   if (data.size() < kFramePrefixSize) return {DecodeStatus::NeedMore};
 
-  const uint32_t len = get_u32(data.data());
-  if (len < kFrameMetaSize || len > kMaxFrameLen) return {DecodeStatus::Invalid};
+  const auto len_or = frame_length(data.first<kFramePrefixSize>());
+  if (!len_or) return {DecodeStatus::Invalid};
+  const uint32_t len = *len_or;
   if (data.size() < kFramePrefixSize + len) return {DecodeStatus::NeedMore};
 
   const uint8_t* meta = data.data() + kFramePrefixSize;

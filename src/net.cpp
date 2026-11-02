@@ -131,12 +131,10 @@ bool send_all(int fd, std::span<const uint8_t> data) {
 std::optional<Frame> read_frame(int fd, Deadline deadline) {
   std::vector<uint8_t> buffer(kFramePrefixSize);
   if (!recv_exact(fd, buffer.data(), kFramePrefixSize, deadline)) return std::nullopt;
-  // decode_frame rejects a bad length from the prefix alone, before we allocate.
-  if (decode_frame(buffer).status == DecodeStatus::Invalid) return std::nullopt;
-  const uint32_t len = uint32_t{buffer[0]} | (uint32_t{buffer[1]} << 8) |
-                       (uint32_t{buffer[2]} << 16) | (uint32_t{buffer[3]} << 24);
-  buffer.resize(kFramePrefixSize + len);
-  if (!recv_exact(fd, buffer.data() + kFramePrefixSize, len, deadline)) return std::nullopt;
+  const auto len = frame_length(std::span(buffer).first<kFramePrefixSize>());
+  if (!len) return std::nullopt;
+  buffer.resize(kFramePrefixSize + *len);
+  if (!recv_exact(fd, buffer.data() + kFramePrefixSize, *len, deadline)) return std::nullopt;
   auto decoded = decode_frame(buffer);
   if (decoded.status != DecodeStatus::Ok) return std::nullopt;
   return std::move(decoded.frame);

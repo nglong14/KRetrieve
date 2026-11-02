@@ -1,4 +1,4 @@
-#include "shard_server.hpp"
+#include "server.hpp"
 
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -206,10 +206,9 @@ class Reactor {
       if (connection.offset != buffer.size()) continue;
 
       if (buffer.size() == kFramePrefixSize) {
-        if (decode_frame(buffer).status == DecodeStatus::Invalid) return false;
-        const uint32_t len = uint32_t{buffer[0]} | (uint32_t{buffer[1]} << 8) |
-                             (uint32_t{buffer[2]} << 16) | (uint32_t{buffer[3]} << 24);
-        buffer.resize(kFramePrefixSize + len);
+        const auto len = frame_length(std::span(buffer).first<kFramePrefixSize>());
+        if (!len) return false;
+        buffer.resize(kFramePrefixSize + *len);
         continue;
       }
       auto decoded = decode_frame(buffer);
@@ -332,15 +331,15 @@ class Reactor {
 
 }  // namespace
 
-ShardServer::ShardServer(const InvertedIndex& index, Fd listener, size_t max_connections,
+FrameServer::FrameServer(const InvertedIndex& index, Fd listener, size_t max_connections,
                          size_t workers)
-    : ShardServer(
+    : FrameServer(
           [&index](const Frame& request, Clock::time_point received) {
             return handle_request(index, request, received);
           },
           std::move(listener), max_connections, workers) {}
 
-ShardServer::ShardServer(RequestHandler handler, Fd listener, size_t max_connections,
+FrameServer::FrameServer(RequestHandler handler, Fd listener, size_t max_connections,
                          size_t workers)
     : handler_(std::move(handler)),
       listener_(std::move(listener)),
@@ -358,7 +357,7 @@ ShardServer::ShardServer(RequestHandler handler, Fd listener, size_t max_connect
   stop_write_ = Fd(fds[1]);
 }
 
-void ShardServer::stop() {
+void FrameServer::stop() {
   const int saved_errno = errno;
   const char byte = 1;
   while (::write(stop_write_.get(), &byte, 1) < 0 && errno == EINTR) {
@@ -366,7 +365,7 @@ void ShardServer::stop() {
   errno = saved_errno;
 }
 
-void ShardServer::run() {
+void FrameServer::run() {
   Reactor reactor(handler_, std::move(listener_), stop_read_.get(), max_connections_);
   reactor.run(worker_count_);
 }

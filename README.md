@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/nglong14/KRetrieve/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nglong14/KRetrieve/actions/workflows/ci.yml)
 
-A C++20 sharded BM25 retrieval engine in progress. Day 1 provides offline corpus
-preparation and immutable, in-process search. Day 2 serves one partition over
-TCP. Day 3 adds a scatter-gather coordinator in front of the shards.
+A C++20 sharded BM25 retrieval engine in progress. An offline `prepare` step
+partitions a corpus and computes global statistics. Each shard serves one
+partition over TCP, and a scatter-gather coordinator fans queries out to every
+shard under a deadline. It merges the top-K from the shards that answer and
+flags the result incomplete when some do not.
 
 ## Build and test
 
@@ -26,60 +28,14 @@ ctest --test-dir build-asan --output-on-failure
 ```
 
 `-DKRETRIEVE_TSAN=ON` is also available in a separate build; it cannot be combined
-with `KRETRIEVE_ASAN`. The shard server is multithreaded, so run the TSan build
-locally after touching it; CI does not run TSan yet.
+with `KRETRIEVE_ASAN`. CI runs both sanitizer builds. If TSan aborts with
+"unexpected memory mapping", the kernel's address randomization is too high for
+it; run the tests with `setarch "$(uname -m)" -R ctest --test-dir build-tsan`.
 
-## Formatting and static analysis
+Formatting, static analysis, CI checks and the release process are described in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-CI uses LLVM 18 for consistent formatting and static-analysis results. On Ubuntu
-24.04, install the tools with:
-
-```bash
-sudo apt-get update
-sudo apt-get install --no-install-recommends -y clang-18 clang-format-18 clang-tidy-18
-```
-
-Check formatting, or replace `--dry-run --Werror` with `-i` to format the files:
-
-```bash
-clang-format-18 --dry-run --Werror src/*.cpp src/*.hpp tests/*.cpp
-```
-
-Run the focused correctness checks in `.clang-tidy` using the real compilation
-settings. The build prepares dependencies; only project sources are analyzed,
-and diagnostics from downloaded GoogleTest headers are excluded.
-
-```bash
-cmake -S . -B build-quality \
-  -DCMAKE_CXX_COMPILER=clang++-18 \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  -DBUILD_TESTING=ON
-cmake --build build-quality --parallel 2
-clang-tidy-18 -p build-quality src/*.cpp tests/*.cpp
-```
-
-Selected static-analysis findings fail the check. Compiler warnings remain
-enabled with `-Wall -Wextra -Wpedantic`; static analysis does not replace tests
-or sanitizers.
-
-## CI and releases
-
-`.github/workflows/ci.yml` runs on pull requests, pushes to `main`, version-tag
-pushes, and manual dispatch. Its required checks are:
-
-| Check | Configuration |
-|---|---|
-| `quality` | LLVM 18 formatting and focused static analysis |
-| `gcc-release` | GCC 13, Release build, all CTest tests |
-| `clang-release` | Clang 18, Release build, all CTest tests |
-| `clang-sanitizers` | Clang 18, Debug build, ASan + UBSan, all CTest tests |
-
-All jobs run on Ubuntu 24.04. Tests have a 60-second per-test timeout, and failed
-build/test jobs upload diagnostics for seven days. PR runs need no secrets and
-cannot publish releases. Superseded PR runs are canceled; release runs are not.
-
-### Download a release
+## Download a release
 
 [GitHub Releases](https://github.com/nglong14/KRetrieve/releases) provides the
 `kretrieve-vVERSION-linux-x86_64.tar.gz` archive and `SHA256SUMS`. For example,
@@ -98,59 +54,6 @@ linked-library information. The initial supported runtime is **Ubuntu 24.04
 x86-64**, with its standard glibc and libstdc++ runtime libraries. The executable
 is dynamically linked, not a portable static binary for all Linux distributions.
 The C++ library is not packaged as an installed/exported SDK.
-
-### Publish a version
-
-After merging and validating the intended commit on `main`, a maintainer can
-publish an annotated tag:
-
-```bash
-git switch main
-git pull --ff-only
-git tag -a v0.1.0 -m "KRetrieve v0.1.0"
-git push origin v0.1.0
-```
-
-Accepted versions are `vMAJOR.MINOR.PATCH` and `vMAJOR.MINOR.PATCH-rc.N`, with
-no leading zeroes and a positive release-candidate number. Use a clearly labeled
-release candidate, such as `v0.1.0-rc.1`, for the first end-to-end publication
-test. Manual workflow dispatch validates code but never publishes a release.
-
-Publishing requires all four checks to pass for the tagged commit and verifies
-that the commit belongs to `main` history. The release job packages the **same
-GCC Release executable that passed the tests**, verifies its checksum, extracts
-it, and runs the existing CLI integration test against that extracted executable.
-No rebuild occurs during publishing. Only the release job receives write access,
-using GitHub's built-in token; no personal publishing token is needed.
-
-A release stays a draft until both assets are uploaded. Release candidates are
-marked as prereleases. Existing releases and their assets are never overwritten.
-If publishing fails after draft creation, inspect and explicitly remove only the
-incomplete draft before rerunning the workflow. Never move an already published
-tag; publish a new version for corrections.
-
-### Repository protection setup (maintainer)
-
-After this workflow is pushed and its four checks have run successfully once,
-configure **Settings → Rules → Rulesets**:
-
-- Protect `main`: require pull requests and the four check names above, and block
-  force pushes and deletion. Select GitHub Actions as the expected check source.
-- Restrict creation of `v*` tags to maintainers/admins using a tag-creation
-  ruleset with the appropriate bypass roles.
-- Use a separate `v*` tag ruleset to block updates and deletion, without a
-  maintainer bypass. Recovery should require an explicit administrator action.
-
-These are repository-side settings, not settings activated by committing YAML.
-Before treating the pipeline as fully commissioned, use a temporary PR to verify
-that formatting errors, a static-analysis violation, a failing test, and a
-sanitizer-detectable error each fail the appropriate check and block merging.
-Then validate release-candidate delivery and confirm that failing tagged checks
-publish nothing. Do not merge the deliberate failures.
-
-Delivery currently means publishing tested CLI binaries, not deploying a
-service. TSan, containers, service deployment, coverage gates, additional
-platforms, and build caches are deferred until they address an actual need.
 
 ## Prepare a corpus
 
@@ -313,9 +216,11 @@ so memory scales with the connection cap and the 16 MiB maximum frame body.
 Extra connections are accepted and closed immediately. Descriptor exhaustion
 temporarily pauses accepting while existing connections continue to be served.
 
-There is no idle timeout or search cancellation yet. An idle client holds its
-connection slot until it disconnects; a disconnect during query execution is
-observed when the response is ready. The `query` CLI still uses blocking I/O.
+The server records when it reads each request. A shard drops a request whose
+`budget_us` has run out by the time a worker picks it up: it closes the
+connection without replying, because the coordinator has already stopped
+waiting. A `budget_us` of 0 means no deadline. There is no idle timeout: an idle
+client holds its connection slot until it disconnects.
 
 ### Message bodies
 
@@ -326,10 +231,12 @@ response echoes the request's `req_id`.
 | Message | Body |
 |---|---|
 | `QueryRequest` (type 1) | `u32 k` (≤ 100000), `u64 budget_us`, `u32 query_len`, query bytes |
-| `QueryResponse` (type 2) | `u8 status`, `u32 hit_count`, then per hit `u64 doc_id`, `f64 score` |
+| `QueryResponse` (type 2) | `u8 status`, `u32 hit_count`, then per hit `u64 doc_id`, `f64 score`, then `u32 missing_count`, then per missing shard `u32 shard_index` |
 
 Status is `0` Ok, `1` BadRequest, `2` InternalError. Hits follow the ranking
-contract above. `budget_us` is carried but ignored until deadlines land (day 4).
+contract above. `budget_us` is the time budget in microseconds (see the
+coordinator section). A non-empty missing-shard list means the result is
+incomplete; shards always send an empty list.
 
 A well-framed request with a malformed body gets `BadRequest`, and the
 connection stays open. An invalid frame (bad length, version, or type) or a
@@ -356,15 +263,30 @@ either. It reuses the shard's epoll front end (`--host`, `--max-connections`,
 1. assigns its own `req_id` (an atomic counter) and sends it to every shard;
    a reply with any other `req_id` counts as a failed shard. The client's own
    `req_id` is echoed back to the client.
-2. fans out through a fixed thread pool of `shards × workers` threads, so a
+2. sets a deadline of receive time + `budget_us` (0 means a 1-second default;
+   budgets are capped at 60 seconds) and forwards the remaining budget to each
+   shard.
+3. fans out through a fixed thread pool of `shards × workers` threads, so a
    full set of workers never waits for a fan-out thread. Each task opens a new
-   TCP connection, sends the request, and reads the reply.
-3. merges per-shard top-K with a size-K min-heap using the same ranking
+   TCP connection, sends the request, and reads the reply. Connecting and
+   reading both stop at the deadline. The task then closes its socket, which
+   cancels the shard request.
+4. merges per-shard top-K with a size-K min-heap using the same ranking
    contract (score desc, document ID asc), so results match an unsharded index.
 
-Any shard failure (connect refused, closed connection, mismatched reply,
-non-Ok status) currently fails the whole query with `InternalError`. Deadlines,
-partial results, and cancellation come next (day 4); shard reads block until then.
+A shard that fails (connect refused, closed connection, mismatched reply,
+non-Ok status) or misses the deadline is left out. The reply is still `Ok`,
+carries the other shards' hits, and lists the missing shards by their position in
+`--shards`. The `query` CLI prints such a result as usual and adds
+`incomplete: missing shards 1,2` on stderr:
+
+```bash
+./build/kretrieve query --port 8000 --k 10 --query "cat dog" --budget-us 200000
+# incomplete: missing shards 1    (stderr, when shard 1 is down or too slow)
+```
+
+The failure model is crash-stop: a shard either answers correctly or does not
+answer in time. Replicas and hedged requests are planned next.
 
 ## Non-goals
 

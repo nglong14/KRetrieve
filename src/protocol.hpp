@@ -46,6 +46,10 @@ struct DecodeResult {
 
 DecodeResult decode_frame(std::span<const uint8_t> data);
 
+// Length field of a frame from its kFramePrefixSize-byte prefix; nullopt if out of range.
+// Lets a reader reject a bad frame before allocating its body.
+std::optional<uint32_t> frame_length(std::span<const uint8_t, kFramePrefixSize> prefix);
+
 // QueryRequest body: [u32 k][u64 budget_us][u32 query_len][query bytes]
 // QueryResponse body: [u8 status][u32 hit_count] then hit_count x [u64 doc_id][f64 score]
 //   then [u32 missing_count] then missing_count x [u32 shard_index]
