@@ -155,8 +155,8 @@ int run_shard(int argc, char** argv) {
 
   const auto index = load_index(stats, partition);
   return serve(
-      [&index](const kretrieve::Frame& request) {
-        return kretrieve::handle_request(index, request);
+      [&index](const kretrieve::Frame& request, kretrieve::Clock::time_point received) {
+        return kretrieve::handle_request(index, request, received);
       },
       options);
 }
@@ -173,7 +173,9 @@ int run_coordinator(int argc, char** argv) {
   // One fan-out thread per shard per concurrently served query.
   kretrieve::Coordinator coordinator(shards, shards.size() * concurrent);
   return serve(
-      [&coordinator](const kretrieve::Frame& request) { return coordinator.handle(request); },
+      [&coordinator](const kretrieve::Frame& request, kretrieve::Clock::time_point received) {
+        return coordinator.handle(request, received);
+      },
       options);
 }
 
@@ -203,6 +205,13 @@ int run_query(int argc, char** argv) {
     std::fprintf(stderr, "query: shard returned status %u\n",
                  static_cast<unsigned>(response->status));
     return 1;
+  }
+  if (!response->missing_shards.empty()) {
+    std::string missing;
+    for (const auto shard : response->missing_shards) {
+      missing += (missing.empty() ? "" : ",") + std::to_string(shard);
+    }
+    std::fprintf(stderr, "incomplete: missing shards %s\n", missing.c_str());
   }
   for (size_t i = 0; i < response->hits.size(); ++i) {
     std::printf("%zu\t%llu\t%.12f\n", i + 1,

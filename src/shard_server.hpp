@@ -11,12 +11,15 @@
 
 namespace kretrieve {
 
-// Answer one request frame. nullopt means "protocol violation, close the
-// connection" (only QueryRequest is accepted). A malformed body yields BadRequest.
-std::optional<Frame> handle_request(const InvertedIndex& index, const Frame& request);
+// Answer one request frame. nullopt means "close the connection without a reply":
+// a non-QueryRequest frame, or a request whose budget_us ran out since `received`
+// (the coordinator has already given up on it). A malformed body yields BadRequest.
+std::optional<Frame> handle_request(const InvertedIndex& index, const Frame& request,
+                                    Clock::time_point received = Clock::now());
 
-// Called concurrently from worker threads; same nullopt contract as handle_request.
-using RequestHandler = std::function<std::optional<Frame>(const Frame&)>;
+// Called concurrently from worker threads with the time the frame was read off the
+// socket, so queueing counts against the budget. Same nullopt contract as handle_request.
+using RequestHandler = std::function<std::optional<Frame>(const Frame&, Clock::time_point)>;
 
 // Frame server used by both shards and the coordinator.
 class ShardServer {

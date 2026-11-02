@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end: prepare 3 shards -> 3 shard processes + coordinator -> query matches 1 shard.
+# End-to-end: prepare 3 shards -> 3 shard processes + coordinator -> query matches 1 shard,
+# then kill a shard and expect a partial result.
 # Usage: coordinator_cli_test.sh <kretrieve-binary> <scratch-parent-dir>
 set -euo pipefail
 
@@ -48,12 +49,16 @@ expected=$'1\t10\t1.071445295349\n2\t20\t0.523548346502\n3\t30\t0.447138587823'
 actual=$("$bin" query --port "$coord" --k 10 --query "cat dog")
 [[ $actual == "$expected" ]] || fail "unexpected hits:"$'\n'"$actual"
 
-# Day 3: a dead shard fails the whole query (day 4 returns partial results).
+# A dead shard is left out: the surviving shards' hits come back, flagged incomplete.
+# prepare partitions by id % 3, so shard 1 holds doc 10.
 kill -TERM "${pids[1]}"
 wait "${pids[1]}" || fail "shard 1 did not exit cleanly"
-rc=0
-"$bin" query --port "$coord" --query cat >/dev/null 2>&1 || rc=$?
-[[ $rc == 1 ]] || fail "expected query to fail with a dead shard (got $rc)"
+actual=$("$bin" query --port "$coord" --k 10 --query "cat dog" --budget-us 500000 \
+  2>"$root/query.err") || fail "partial query failed"
+expected=$'1\t20\t0.523548346502\n2\t30\t0.447138587823'
+[[ $actual == "$expected" ]] || fail "unexpected partial hits:"$'\n'"$actual"
+grep -qx 'incomplete: missing shards 1' "$root/query.err" ||
+  fail "missing incomplete flag: $(cat "$root/query.err")"
 
 kill -TERM "${pids[3]}"
 wait "${pids[3]}" || fail "coordinator did not exit cleanly on SIGTERM"

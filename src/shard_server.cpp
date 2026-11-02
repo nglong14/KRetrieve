@@ -25,10 +25,17 @@
 
 namespace kretrieve {
 
-std::optional<Frame> handle_request(const InvertedIndex& index, const Frame& request) {
+std::optional<Frame> handle_request(const InvertedIndex& index, const Frame& request,
+                                    Clock::time_point received) {
   if (request.type != MsgType::QueryRequest) return std::nullopt;
   QueryResponse response;
   if (const auto query = decode_request(request.body)) {
+    // Compare elapsed time, not received + budget: any client can send a huge budget_us.
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - received).count();
+    if (query->budget_us != 0 && static_cast<uint64_t>(elapsed) >= query->budget_us) {
+      return std::nullopt;  // expired: the caller stopped waiting
+    }
     try {
       response.hits = index.search(query->query, query->k);
     } catch (const std::exception&) {
@@ -141,6 +148,7 @@ class Reactor {
   struct Job {
     uint64_t connection;
     Frame request;
+    Clock::time_point received;
     std::vector<uint8_t> response;  // empty means close the connection
   };
 
@@ -206,7 +214,7 @@ class Reactor {
       }
       auto decoded = decode_frame(buffer);
       if (decoded.status != DecodeStatus::Ok) return false;
-      pending_.push_back({id, std::move(decoded.frame), {}});
+      pending_.push_back({id, std::move(decoded.frame), Clock::now(), {}});
       std::vector<uint8_t>().swap(buffer);  // do not retain large request buffers
       connection.offset = 0;
       connection.phase = Phase::Busy;
@@ -256,7 +264,7 @@ class Reactor {
       }
       auto& job = current.front();
       try {
-        if (const auto response = handler_(job.request)) {
+        if (const auto response = handler_(job.request, job.received)) {
           job.response = encode_frame(*response);
         }
       } catch (...) {
@@ -326,8 +334,11 @@ class Reactor {
 
 ShardServer::ShardServer(const InvertedIndex& index, Fd listener, size_t max_connections,
                          size_t workers)
-    : ShardServer([&index](const Frame& request) { return handle_request(index, request); },
-                  std::move(listener), max_connections, workers) {}
+    : ShardServer(
+          [&index](const Frame& request, Clock::time_point received) {
+            return handle_request(index, request, received);
+          },
+          std::move(listener), max_connections, workers) {}
 
 ShardServer::ShardServer(RequestHandler handler, Fd listener, size_t max_connections,
                          size_t workers)

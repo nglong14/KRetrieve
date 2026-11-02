@@ -92,7 +92,8 @@ std::optional<QueryRequest> decode_request(std::span<const uint8_t> body) {
 }
 
 std::vector<uint8_t> encode_response(const QueryResponse& response) {
-  std::vector<uint8_t> out(kResponseHeaderSize + response.hits.size() * kHitSize);
+  const size_t missing_at = kResponseHeaderSize + response.hits.size() * kHitSize;
+  std::vector<uint8_t> out(missing_at + 4 + response.missing_shards.size() * 4);
   out[0] = static_cast<uint8_t>(response.status);
   put_u32(out.data() + 1, static_cast<uint32_t>(response.hits.size()));
   uint8_t* p = out.data() + kResponseHeaderSize;
@@ -101,6 +102,12 @@ std::vector<uint8_t> encode_response(const QueryResponse& response) {
     put_u64(p + 8, std::bit_cast<uint64_t>(hit.score));
     p += kHitSize;
   }
+  put_u32(p, static_cast<uint32_t>(response.missing_shards.size()));
+  p += 4;
+  for (const uint32_t shard : response.missing_shards) {
+    put_u32(p, shard);
+    p += 4;
+  }
   return out;
 }
 
@@ -108,9 +115,10 @@ std::optional<QueryResponse> decode_response(std::span<const uint8_t> body) {
   if (body.size() < kResponseHeaderSize) return std::nullopt;
   if (body[0] > static_cast<uint8_t>(ResponseStatus::InternalError)) return std::nullopt;
   const uint32_t count = get_u32(body.data() + 1);
-  if (count > kMaxK || body.size() - kResponseHeaderSize != uint64_t{count} * kHitSize) {
-    return std::nullopt;
-  }
+  const uint64_t missing_at = kResponseHeaderSize + uint64_t{count} * kHitSize;
+  if (count > kMaxK || body.size() < missing_at + 4) return std::nullopt;
+  const uint32_t missing = get_u32(body.data() + missing_at);
+  if (body.size() - missing_at - 4 != uint64_t{missing} * 4) return std::nullopt;
   QueryResponse response;
   response.status = static_cast<ResponseStatus>(body[0]);
   response.hits.resize(count);
@@ -119,6 +127,12 @@ std::optional<QueryResponse> decode_response(std::span<const uint8_t> body) {
     hit.document_id = get_u64(p);
     hit.score = std::bit_cast<double>(get_u64(p + 8));
     p += kHitSize;
+  }
+  response.missing_shards.resize(missing);
+  p += 4;
+  for (auto& shard : response.missing_shards) {
+    shard = get_u32(p);
+    p += 4;
   }
   return response;
 }

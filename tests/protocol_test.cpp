@@ -155,8 +155,8 @@ TEST(MessageCodec, RejectsMalformedRequests) {
 }
 
 TEST(MessageCodec, ResponseRoundTripIsBitExact) {
-  const QueryResponse in{ResponseStatus::Ok,
-                         {{10, 1.071445295349}, {UINT64_MAX, 4.9e-324}, {0, -0.0}}};
+  const QueryResponse in{
+      ResponseStatus::Ok, {{10, 1.071445295349}, {UINT64_MAX, 4.9e-324}, {0, -0.0}}, {}};
   const auto out = decode_response(encode_response(in));
   ASSERT_TRUE(out);
   EXPECT_EQ(out->status, ResponseStatus::Ok);
@@ -166,13 +166,17 @@ TEST(MessageCodec, ResponseRoundTripIsBitExact) {
     EXPECT_EQ(std::bit_cast<uint64_t>(out->hits[i].score),
               std::bit_cast<uint64_t>(in.hits[i].score));
   }
-  const auto error = decode_response(encode_response({ResponseStatus::BadRequest, {}}));
+  EXPECT_TRUE(out->missing_shards.empty());
+  const auto partial = decode_response(encode_response({ResponseStatus::Ok, {{1, 1.0}}, {2, 7}}));
+  ASSERT_TRUE(partial);
+  EXPECT_EQ(partial->missing_shards, (std::vector<uint32_t>{2, 7}));
+  const auto error = decode_response(encode_response({ResponseStatus::BadRequest, {}, {}}));
   ASSERT_TRUE(error);
   EXPECT_EQ(error->status, ResponseStatus::BadRequest);
 }
 
 TEST(MessageCodec, RejectsMalformedResponses) {
-  const auto wire = encode_response({ResponseStatus::Ok, {{1, 1.0}}});
+  const auto wire = encode_response({ResponseStatus::Ok, {{1, 1.0}}, {}});
   EXPECT_FALSE(decode_response(std::span<const uint8_t>(wire).first(4)));
   EXPECT_FALSE(decode_response(std::span<const uint8_t>(wire).first(wire.size() - 1)));
   auto trailing = wire;
@@ -181,4 +185,6 @@ TEST(MessageCodec, RejectsMalformedResponses) {
   auto bad_status = wire;
   bad_status[0] = 3;
   EXPECT_FALSE(decode_response(bad_status));
+  const auto partial = encode_response({ResponseStatus::Ok, {}, {1, 2}});
+  EXPECT_FALSE(decode_response(std::span<const uint8_t>(partial).first(partial.size() - 4)));
 }
