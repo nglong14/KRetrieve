@@ -2,10 +2,12 @@
 #pragma once
 
 #include "index.hpp"
+#include "net.hpp"
 #include "protocol.hpp"
 #include "thread_pool.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -32,9 +34,14 @@ class Coordinator {
   // pool_threads should be at least shards x concurrent queries, so fan-out never queues.
   Coordinator(std::vector<ShardAddress> shards, size_t pool_threads);
 
+  // ponytail: fixed constants; make them flags when someone needs to tune them.
+  static constexpr std::chrono::microseconds kDefaultBudget{1'000'000};  // client sent 0
+  static constexpr std::chrono::microseconds kMaxBudget{60'000'000};
+
   // Thread-safe. Same contract as handle_request: nullopt closes the client connection.
-  // Any shard failure yields InternalError (day 4 turns this into partial results).
-  std::optional<Frame> handle(const Frame& request);
+  // The deadline is received + budget_us. Shards that fail or miss it are left out
+  // and listed in missing_shards (by index in the shard list); the reply is still Ok.
+  std::optional<Frame> handle(const Frame& request, Clock::time_point received = Clock::now());
 
  private:
   std::vector<ShardAddress> shards_;

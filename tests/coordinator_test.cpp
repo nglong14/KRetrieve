@@ -6,6 +6,7 @@
 
 #include <sys/socket.h>
 
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -63,9 +64,9 @@ struct Cluster {
 };
 
 std::optional<QueryResponse> ask(Coordinator& coordinator, const std::string& query, uint32_t k,
-                                 uint64_t client_id = 42) {
+                                 uint64_t budget_us = 0, uint64_t client_id = 42) {
   const auto reply =
-      coordinator.handle({MsgType::QueryRequest, client_id, encode_request({k, 0, query})});
+      coordinator.handle({MsgType::QueryRequest, client_id, encode_request({k, budget_us, query})});
   if (!reply) return std::nullopt;
   EXPECT_EQ(reply->type, MsgType::QueryResponse);
   EXPECT_EQ(reply->req_id, client_id);  // the client's id is echoed, not the internal one
@@ -111,6 +112,7 @@ TEST(Coordinator, ThreeShardsMatchUnshardedSearch) {
       const auto response = ask(coordinator, query, k);
       ASSERT_TRUE(response) << query;
       EXPECT_EQ(response->status, ResponseStatus::Ok);
+      EXPECT_TRUE(response->missing_shards.empty());
       expect_same_hits(response->hits, full.search(query, k));
     }
   }
@@ -125,7 +127,7 @@ TEST(Coordinator, BadRequestBodyAndWrongFrameType) {
   EXPECT_FALSE(coordinator.handle({MsgType::QueryResponse, 7, {}}));
 }
 
-TEST(Coordinator, DeadShardFailsTheQuery) {
+TEST(Coordinator, DeadShardYieldsPartialResult) {
   Cluster cluster;
   auto addresses = cluster.addresses;
   {
@@ -135,10 +137,49 @@ TEST(Coordinator, DeadShardFailsTheQuery) {
   Coordinator coordinator(addresses, 4);
   const auto response = ask(coordinator, "cat", 10);
   ASSERT_TRUE(response);
-  EXPECT_EQ(response->status, ResponseStatus::InternalError);
+  EXPECT_EQ(response->status, ResponseStatus::Ok);
+  EXPECT_EQ(response->missing_shards, (std::vector<uint32_t>{3}));
+  expect_same_hits(response->hits, InvertedIndex(kCorpus, cluster.stats).search("cat", 10));
 }
 
-TEST(Coordinator, MismatchedShardReqIdFailsTheQuery) {
+// Day-4 exit criterion: a shard that never answers is cut off at the deadline,
+// its socket is closed (cancellation), and the rest of the answer comes back flagged.
+TEST(Coordinator, SlowShardExcludedAndFlaggedIncomplete) {
+  Cluster cluster;
+  auto listener = listen_tcp("127.0.0.1", 0);
+  auto addresses = cluster.addresses;
+  addresses.push_back({"127.0.0.1", local_port(listener.get())});
+  bool cancelled = false;
+  uint64_t forwarded_budget = 0;
+  std::thread slow([&] {
+    const Fd client(accept(listener.get(), nullptr, nullptr));
+    const auto request = read_frame(client.get());
+    ASSERT_TRUE(request);
+    forwarded_budget = decode_request(request->body)->budget_us;
+    // Never reply. The coordinator must close the socket; 5 s means it did not.
+    const timeval limit{5, 0};
+    setsockopt(client.get(), SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof limit);
+    char byte;
+    cancelled = recv(client.get(), &byte, 1, 0) == 0;
+  });
+  Coordinator coordinator(addresses, 4);
+  const auto start = Clock::now();
+  const auto response = ask(coordinator, "cat dog", 10, /*budget_us=*/100'000);
+  const auto took = Clock::now() - start;
+  slow.join();
+
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, ResponseStatus::Ok);
+  EXPECT_EQ(response->missing_shards, (std::vector<uint32_t>{3}));
+  expect_same_hits(response->hits, InvertedIndex(kCorpus, cluster.stats).search("cat dog", 10));
+  EXPECT_GE(took, std::chrono::milliseconds(100));
+  EXPECT_LT(took, std::chrono::seconds(1));
+  EXPECT_TRUE(cancelled);
+  EXPECT_GT(forwarded_budget, 0u);  // the shard gets what is left, not the full budget
+  EXPECT_LE(forwarded_budget, 100'000u);
+}
+
+TEST(Coordinator, MismatchedShardReqIdCountsAsMissing) {
   // A fake shard that answers with the wrong request id.
   auto listener = listen_tcp("127.0.0.1", 0);
   const uint16_t port = local_port(listener.get());
@@ -153,7 +194,9 @@ TEST(Coordinator, MismatchedShardReqIdFailsTheQuery) {
   const auto response = ask(coordinator, "cat", 10);
   fake.join();
   ASSERT_TRUE(response);
-  EXPECT_EQ(response->status, ResponseStatus::InternalError);
+  EXPECT_EQ(response->status, ResponseStatus::Ok);
+  EXPECT_EQ(response->missing_shards, (std::vector<uint32_t>{0}));
+  EXPECT_TRUE(response->hits.empty());
 }
 
 TEST(Coordinator, ConcurrentQueriesThroughTheCoordinatorServer) {
@@ -161,8 +204,9 @@ TEST(Coordinator, ConcurrentQueriesThroughTheCoordinatorServer) {
   Coordinator coordinator(cluster.addresses, 3 * 4);
   auto listener = listen_tcp("127.0.0.1", 0);
   const uint16_t port = local_port(listener.get());
-  ShardServer server([&coordinator](const Frame& f) { return coordinator.handle(f); },
-                     std::move(listener), 64, 4);
+  ShardServer server(
+      [&coordinator](const Frame& f, Clock::time_point t) { return coordinator.handle(f, t); },
+      std::move(listener), 64, 4);
   std::thread serving([&server] { server.run(); });
 
   const InvertedIndex full(kCorpus, cluster.stats);

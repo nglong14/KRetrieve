@@ -13,13 +13,15 @@
 namespace kretrieve {
 namespace {
 
-// One blocking round trip; nullopt on any failure (connect, I/O, wrong reply).
+// One round trip bounded by deadline; nullopt on any failure (connect, I/O, timeout,
+// wrong reply). Returning closes the socket, which is how a late shard is cancelled.
 std::optional<QueryResponse> query_shard(const ShardAddress& shard, uint64_t req_id,
-                                         const std::vector<uint8_t>& request) {
+                                         const std::vector<uint8_t>& request,
+                                         Clock::time_point deadline) {
   try {
-    const auto fd = connect_tcp(shard.host, shard.port);
+    const auto fd = connect_tcp(shard.host, shard.port, deadline);
     if (!send_all(fd.get(), request)) return std::nullopt;
-    const auto reply = read_frame(fd.get());
+    const auto reply = read_frame(fd.get(), deadline);
     if (!reply || reply->type != MsgType::QueryResponse || reply->req_id != req_id) {
       return std::nullopt;
     }
@@ -81,35 +83,47 @@ Coordinator::Coordinator(std::vector<ShardAddress> shards, size_t pool_threads)
   if (shards_.empty()) throw std::invalid_argument("coordinator needs at least one shard");
 }
 
-std::optional<Frame> Coordinator::handle(const Frame& request) {
+std::optional<Frame> Coordinator::handle(const Frame& request, Clock::time_point received) {
+  using std::chrono::microseconds;
   if (request.type != MsgType::QueryRequest) return std::nullopt;
-  const auto query = decode_request(request.body);
-  if (!query) return reply(request.req_id, {ResponseStatus::BadRequest, {}});
+  auto query = decode_request(request.body);
+  if (!query) return reply(request.req_id, {ResponseStatus::BadRequest, {}, {}});
+
+  const auto budget = query->budget_us == 0
+                          ? kDefaultBudget
+                          : microseconds(std::min<uint64_t>(query->budget_us, kMaxBudget.count()));
+  const auto deadline = received + budget;
+
+  // Shards get what is left of the budget so they can drop work we stopped waiting for.
+  const auto left = std::chrono::duration_cast<microseconds>(deadline - Clock::now());
+  query->budget_us = static_cast<uint64_t>(std::max<int64_t>(left.count(), 1));
 
   // Our own id on every shard request; replies carrying another id are rejected.
   const uint64_t req_id = next_req_id_.fetch_add(1, std::memory_order_relaxed);
-  const auto shard_request = encode_frame({MsgType::QueryRequest, req_id, request.body});
+  const auto shard_request = encode_frame({MsgType::QueryRequest, req_id, encode_request(*query)});
 
   std::vector<std::future<std::optional<QueryResponse>>> pending;
   pending.reserve(shards_.size());
   for (const auto& shard : shards_) {
-    pending.push_back(pool_.submit(
-        [&shard, req_id, &shard_request] { return query_shard(shard, req_id, shard_request); }));
+    pending.push_back(pool_.submit([&shard, req_id, &shard_request, deadline] {
+      return query_shard(shard, req_id, shard_request, deadline);
+    }));
   }
 
-  // Wait for every task before returning: they reference shard_request.
+  // Every task returns by the deadline, so waiting on all of them is bounded.
+  // It is also required: the tasks reference shard_request.
   std::vector<std::vector<SearchHit>> shard_hits;
-  bool failed = false;
-  for (auto& future : pending) {
-    auto response = future.get();
+  QueryResponse out;
+  for (size_t i = 0; i < pending.size(); ++i) {
+    auto response = pending[i].get();
     if (!response || response->status != ResponseStatus::Ok) {
-      failed = true;
+      out.missing_shards.push_back(static_cast<uint32_t>(i));
     } else {
       shard_hits.push_back(std::move(response->hits));
     }
   }
-  if (failed) return reply(request.req_id, {ResponseStatus::InternalError, {}});
-  return reply(request.req_id, {ResponseStatus::Ok, merge_top_k(shard_hits, query->k)});
+  out.hits = merge_top_k(shard_hits, query->k);
+  return reply(request.req_id, out);
 }
 
 }  // namespace kretrieve

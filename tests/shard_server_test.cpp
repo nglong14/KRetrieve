@@ -105,6 +105,31 @@ TEST(HandleRequest, AnswersQueriesAndFlagsBadInput) {
   EXPECT_FALSE(handle_request(index, {MsgType::QueryResponse, 5, {}}));
 }
 
+TEST(HandleRequest, DropsRequestsWhoseBudgetExpired) {
+  const InvertedIndex index(kCorpus, compute_global_stats(kCorpus));
+  const auto long_ago = Clock::now() - std::chrono::seconds(1);
+  const Frame expired{MsgType::QueryRequest, 1, encode_request({10, 1000, "cat"})};
+  EXPECT_FALSE(handle_request(index, expired, long_ago));
+  const Frame fresh{MsgType::QueryRequest, 1, encode_request({10, 60'000'000, "cat"})};
+  EXPECT_TRUE(handle_request(index, fresh, long_ago));
+  // budget_us == 0 means no deadline; a huge budget must not overflow.
+  EXPECT_TRUE(handle_request(index, request_frame(1, "cat"), long_ago));
+  const Frame huge{MsgType::QueryRequest, 1, encode_request({10, UINT64_MAX, "cat"})};
+  EXPECT_TRUE(handle_request(index, huge, long_ago));
+}
+
+TEST(ReadFrame, GivesUpAtTheDeadline) {
+  int pair[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);
+  const Fd reader(pair[0]);
+  const Fd writer(pair[1]);
+  const auto start = Clock::now();
+  EXPECT_FALSE(read_frame(reader.get(), start + std::chrono::milliseconds(50)));
+  const auto waited = Clock::now() - start;
+  EXPECT_GE(waited, std::chrono::milliseconds(50));
+  EXPECT_LT(waited, std::chrono::seconds(2));
+}
+
 TEST(ReadFrame, ReassemblesSplitWritesAndRejectsOversizedPrefix) {
   int pair[2];
   ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);

@@ -48,6 +48,7 @@ DecodeResult decode_frame(std::span<const uint8_t> data);
 
 // QueryRequest body: [u32 k][u64 budget_us][u32 query_len][query bytes]
 // QueryResponse body: [u8 status][u32 hit_count] then hit_count x [u64 doc_id][f64 score]
+//   then [u32 missing_count] then missing_count x [u32 shard_index]
 // Decoders return nullopt for truncated, oversized, or trailing-byte bodies.
 constexpr uint32_t kMaxK = 100'000;  // keeps a full response far below kMaxBodySize
 
@@ -59,13 +60,14 @@ enum class ResponseStatus : uint8_t {
 
 struct QueryRequest {
   uint32_t k = 0;
-  uint64_t budget_us = 0;  // reserved for deadlines (day 4); ignored by the shard
+  uint64_t budget_us = 0;  // 0 = no deadline (shard) / default budget (coordinator)
   std::string query;
 };
 
 struct QueryResponse {
   ResponseStatus status = ResponseStatus::Ok;
   std::vector<SearchHit> hits;
+  std::vector<uint32_t> missing_shards;  // non-empty means the result is incomplete
 };
 
 std::vector<uint8_t> encode_request(const QueryRequest& request);
