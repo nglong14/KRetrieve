@@ -1,4 +1,4 @@
-#include "shard_server.hpp"
+#include "server.hpp"
 
 #include <gtest/gtest.h>
 
@@ -60,7 +60,7 @@ class RunningShard {
       setsockopt(listener.get(), SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof send_buffer);
     }
     port = local_port(listener.get());
-    server_ = std::make_unique<ShardServer>(index_, std::move(listener), max_connections, workers);
+    server_ = std::make_unique<FrameServer>(index_, std::move(listener), max_connections, workers);
     thread_ = std::thread([this] { server_->run(); });
   }
   ~RunningShard() { stop(); }
@@ -80,7 +80,7 @@ class RunningShard {
 
  private:
   const InvertedIndex index_;
-  std::unique_ptr<ShardServer> server_;
+  std::unique_ptr<FrameServer> server_;
   std::thread thread_;
 };
 
@@ -152,7 +152,7 @@ TEST(ReadFrame, ReassemblesSplitWritesAndRejectsOversizedPrefix) {
   EXPECT_FALSE(read_frame(reader.get()));  // clean EOF
 }
 
-TEST(ShardServer, ServesSequentialAndConcurrentClients) {
+TEST(FrameServer, ServesSequentialAndConcurrentClients) {
   RunningShard shard;
   const auto connection = shard.connect();
   for (uint64_t id = 1; id <= 3; ++id) {
@@ -175,7 +175,7 @@ TEST(ShardServer, ServesSequentialAndConcurrentClients) {
   for (auto& client : clients) client.join();
 }
 
-TEST(ShardServer, BadBodyKeepsConnectionButBadFrameClosesIt) {
+TEST(FrameServer, BadBodyKeepsConnectionButBadFrameClosesIt) {
   RunningShard shard;
   const auto connection = shard.connect();
   ASSERT_TRUE(send_all(connection.get(), encode_frame({MsgType::QueryRequest, 1, {0xff}})));
@@ -199,7 +199,7 @@ TEST(ShardServer, BadBodyKeepsConnectionButBadFrameClosesIt) {
   EXPECT_FALSE(read_frame(third.get()));  // invalid length needs no body
 }
 
-TEST(ShardServer, RejectsConnectionsOverCapUntilASlotFrees) {
+TEST(FrameServer, RejectsConnectionsOverCapUntilASlotFrees) {
   RunningShard shard(1);
   auto first = shard.connect();
   ASSERT_TRUE(query(first.get(), 1, "cat"));  // first is now registered as a connection
@@ -217,7 +217,7 @@ TEST(ShardServer, RejectsConnectionsOverCapUntilASlotFrees) {
   EXPECT_TRUE(served);
 }
 
-TEST(ShardServer, StopReturnsWithIdleClientsConnected) {
+TEST(FrameServer, StopReturnsWithIdleClientsConnected) {
   RunningShard shard;
   const auto idle_a = shard.connect();
   const auto idle_b = shard.connect();
@@ -226,7 +226,7 @@ TEST(ShardServer, StopReturnsWithIdleClientsConnected) {
   EXPECT_FALSE(read_frame(idle_a.get()));
 }
 
-TEST(ShardServer, IdleConnectionsDoNotCreateThreads) {
+TEST(FrameServer, IdleConnectionsDoNotCreateThreads) {
   const auto thread_count = [] {
     const auto tasks = std::filesystem::directory_iterator("/proc/self/task");
     return std::distance(begin(tasks), end(tasks));
@@ -242,7 +242,7 @@ TEST(ShardServer, IdleConnectionsDoNotCreateThreads) {
   EXPECT_EQ(thread_count(), baseline);
 }
 
-TEST(ShardServer, PartialRequestDoesNotBlockOtherClients) {
+TEST(FrameServer, PartialRequestDoesNotBlockOtherClients) {
   RunningShard shard(64, 1);
   const auto slow = shard.connect();
   const auto wire = encode_frame(request_frame(11, "cat dog"));
@@ -259,7 +259,7 @@ TEST(ShardServer, PartialRequestDoesNotBlockOtherClients) {
   expect_readme_hits(decode_response(response->body)->hits);
 }
 
-TEST(ShardServer, PipelinedRequestsStayOrderedAndSurviveWriteHalfClose) {
+TEST(FrameServer, PipelinedRequestsStayOrderedAndSurviveWriteHalfClose) {
   RunningShard shard(64, 1);
   const auto fd = shard.connect();
   std::vector<uint8_t> pipeline;
@@ -280,7 +280,7 @@ TEST(ShardServer, PipelinedRequestsStayOrderedAndSurviveWriteHalfClose) {
   EXPECT_FALSE(read_frame(fd.get()));
 }
 
-TEST(ShardServer, DisconnectChurnDoesNotMixResponses) {
+TEST(FrameServer, DisconnectChurnDoesNotMixResponses) {
   RunningShard shard(16, 1);
   for (uint64_t id = 1; id <= 100; ++id) {
     {
@@ -294,7 +294,7 @@ TEST(ShardServer, DisconnectChurnDoesNotMixResponses) {
   }
 }
 
-TEST(ShardServer, SlowReaderDoesNotBlockQueriesAndResponsesAreComplete) {
+TEST(FrameServer, SlowReaderDoesNotBlockQueriesAndResponsesAreComplete) {
   std::vector<Document> corpus;
   for (uint64_t id = 0; id < 20'000; ++id) corpus.push_back({id, "cat"});
   RunningShard shard(64, 1, corpus, 4096);
@@ -319,7 +319,7 @@ TEST(ShardServer, SlowReaderDoesNotBlockQueriesAndResponsesAreComplete) {
   }
 }
 
-TEST(ShardServer, StopWithPartialAndQueuedRequests) {
+TEST(FrameServer, StopWithPartialAndQueuedRequests) {
   RunningShard shard(64, 1);
   std::vector<Fd> clients;
   for (uint64_t id = 0; id < 32; ++id) {
@@ -332,7 +332,7 @@ TEST(ShardServer, StopWithPartialAndQueuedRequests) {
   EXPECT_FALSE(read_frame(observer));
 }
 
-TEST(ShardServer, RecoversAfterDescriptorExhaustion) {
+TEST(FrameServer, RecoversAfterDescriptorExhaustion) {
   RunningShard shard(64, 1);
   const auto active = shard.connect();
   ASSERT_TRUE(query(active.get(), 1, "cat"));  // pool and reactor are fully started

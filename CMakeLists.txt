@@ -19,7 +19,7 @@ add_library(kretrieve_core
   src/net.cpp
   src/prepare.cpp
   src/protocol.cpp
-  src/shard_server.cpp
+  src/server.cpp
   src/tokenizer.cpp)
 find_package(Threads REQUIRED)
 target_link_libraries(kretrieve_core PUBLIC Threads::Threads)
@@ -54,7 +54,7 @@ if(BUILD_TESTING)
     tests/index_test.cpp
     tests/prepare_test.cpp
     tests/protocol_test.cpp
-    tests/shard_server_test.cpp
+    tests/server_test.cpp
     tests/tokenizer_test.cpp)
   target_link_libraries(kretrieve_tests PRIVATE kretrieve_core GTest::gtest_main)
   target_compile_definitions(kretrieve_tests PRIVATE

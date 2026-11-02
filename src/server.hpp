@@ -22,14 +22,14 @@ std::optional<Frame> handle_request(const InvertedIndex& index, const Frame& req
 using RequestHandler = std::function<std::optional<Frame>(const Frame&, Clock::time_point)>;
 
 // Frame server used by both shards and the coordinator.
-class ShardServer {
+class FrameServer {
  public:
   // workers=0 selects min(connection cap, CPU count).
-  ShardServer(RequestHandler handler, Fd listener, size_t max_connections, size_t workers = 0);
+  FrameServer(RequestHandler handler, Fd listener, size_t max_connections, size_t workers = 0);
   // index must outlive the server.
-  ShardServer(const InvertedIndex& index, Fd listener, size_t max_connections, size_t workers = 0);
-  ShardServer(const ShardServer&) = delete;
-  ShardServer& operator=(const ShardServer&) = delete;
+  FrameServer(const InvertedIndex& index, Fd listener, size_t max_connections, size_t workers = 0);
+  FrameServer(const FrameServer&) = delete;
+  FrameServer& operator=(const FrameServer&) = delete;
 
   // Call once. Shutdown drops queued work, closes sockets, and joins active searches.
   void run();

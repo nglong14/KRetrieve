@@ -1,6 +1,6 @@
 #include "coordinator.hpp"
 #include "net.hpp"
-#include "shard_server.hpp"
+#include "server.hpp"
 
 #include <gtest/gtest.h>
 
@@ -30,7 +30,7 @@ class RunningShard {
       : index_(documents, stats) {
     auto listener = listen_tcp("127.0.0.1", 0);
     port = local_port(listener.get());
-    server_ = std::make_unique<ShardServer>(index_, std::move(listener), 64, 2);
+    server_ = std::make_unique<FrameServer>(index_, std::move(listener), 64, 2);
     thread_ = std::thread([this] { server_->run(); });
   }
   ~RunningShard() {
@@ -42,7 +42,7 @@ class RunningShard {
 
  private:
   const InvertedIndex index_;
-  std::unique_ptr<ShardServer> server_;
+  std::unique_ptr<FrameServer> server_;
   std::thread thread_;
 };
 
@@ -204,7 +204,7 @@ TEST(Coordinator, ConcurrentQueriesThroughTheCoordinatorServer) {
   Coordinator coordinator(cluster.addresses, 3 * 4);
   auto listener = listen_tcp("127.0.0.1", 0);
   const uint16_t port = local_port(listener.get());
-  ShardServer server(
+  FrameServer server(
       [&coordinator](const Frame& f, Clock::time_point t) { return coordinator.handle(f, t); },
       std::move(listener), 64, 4);
   std::thread serving([&server] { server.run(); });

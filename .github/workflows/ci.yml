@@ -58,19 +58,29 @@ jobs:
             package: g++-13
             build-type: Release
             asan: 'OFF'
+            tsan: 'OFF'
           - name: clang-release
             compiler: clang++-18
             package: clang-18
             build-type: Release
             asan: 'OFF'
+            tsan: 'OFF'
           - name: clang-sanitizers
             compiler: clang++-18
             package: clang-18
             build-type: Debug
             asan: 'ON'
+            tsan: 'OFF'
+          - name: clang-tsan
+            compiler: clang++-18
+            package: clang-18
+            build-type: RelWithDebInfo
+            asan: 'OFF'
+            tsan: 'ON'
     env:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,13 +96,20 @@ jobs:
           CXX: ${{ matrix.compiler }}
           BUILD_TYPE: ${{ matrix.build-type }}
           ASAN: ${{ matrix.asan }}
+          TSAN: ${{ matrix.tsan }}
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
           -DBUILD_TESTING=ON
           -DKRETRIEVE_ASAN="$ASAN"
+          -DKRETRIEVE_TSAN="$TSAN"
       - name: Build
         run: cmake --build build --parallel 2
+      - name: Lower ASLR entropy for TSan
+        # TSan aborts with "unexpected memory mapping" under the runner kernel's
+        # default vm.mmap_rnd_bits=32.
+        if: matrix.tsan == 'ON'
+        run: sudo sysctl vm.mmap_rnd_bits=28
       - name: Test
         run: >-
           ctest --test-dir build --output-on-failure --no-tests=error
@@ -179,6 +196,7 @@ jobs:
             "-DTEST_ROOT=$smoke" \
             -P tests/prepare_cli_test.cmake
           bash tests/shard_cli_test.sh "$smoke/kretrieve-${VERSION}-linux-x86_64/kretrieve" "$smoke"
+          bash tests/coordinator_cli_test.sh "$smoke/kretrieve-${VERSION}-linux-x86_64/kretrieve" "$smoke"
       - name: Publish release without replacing existing versions
         env:
           GH_TOKEN: ${{ github.token }}

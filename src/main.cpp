@@ -4,7 +4,7 @@
 #include "net.hpp"
 #include "prepare.hpp"
 #include "protocol.hpp"
-#include "shard_server.hpp"
+#include "server.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -99,7 +99,7 @@ int run_prepare(int argc, char** argv) {
   return 0;
 }
 
-std::atomic<kretrieve::ShardServer*> g_server{nullptr};
+std::atomic<kretrieve::FrameServer*> g_server{nullptr};
 
 void handle_stop_signal(int /*signal*/) {
   if (auto* server = g_server.load()) server->stop();
@@ -121,7 +121,7 @@ int serve(const kretrieve::RequestHandler& handler, const Options& options) {
   const auto host = optional(options, "--host", "127.0.0.1");
   auto listener = kretrieve::listen_tcp(host, port);
   const auto bound_port = kretrieve::local_port(listener.get());
-  kretrieve::ShardServer server(handler, std::move(listener), max_connections(options),
+  kretrieve::FrameServer server(handler, std::move(listener), max_connections(options),
                                 workers(options));
 
   g_server = &server;
@@ -165,7 +165,7 @@ int run_coordinator(int argc, char** argv) {
   const auto options =
       parse_options(argc, argv, {"--shards", "--port", "--host", "--max-connections", "--workers"});
   const auto shards = kretrieve::parse_shard_list(required(options, "--shards"));
-  // Same default as ShardServer: min(connection cap, CPU count) workers serve queries at once.
+  // Same default as FrameServer: min(connection cap, CPU count) workers serve queries at once.
   const size_t concurrent =
       workers(options) != 0 ? workers(options)
                             : std::min(max_connections(options),
