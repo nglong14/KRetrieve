@@ -1,10 +1,12 @@
 // Command-line entry point and role selection.
+#include "coordinator.hpp"
 #include "index.hpp"
 #include "net.hpp"
 #include "prepare.hpp"
 #include "protocol.hpp"
 #include "shard_server.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <csignal>
@@ -17,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -28,7 +31,8 @@ int usage(const char* argv0) {
                "  shard --stats <global_stats.bin> --partition <shard-N.tsv> --port <P>\n"
                "        [--host 127.0.0.1] [--max-connections 64] [--workers <N>]\n"
                "  query --port <P> --query <text> [--host 127.0.0.1] [--k 10] [--budget-us 0]\n"
-               "  coordinator  fan queries out to shards\n",
+               "  coordinator --shards <host:port,...> --port <P>\n"
+               "        [--host 127.0.0.1] [--max-connections 64] [--workers <N>]\n",
                argv0);
   return 2;
 }
@@ -74,6 +78,17 @@ T parse_number(const std::string& value, std::string_view name, T min) {
   return out;
 }
 
+size_t max_connections(const Options& options) {
+  return parse_number<size_t>(optional(options, "--max-connections", "64"), "--max-connections", 1);
+}
+
+// 0 lets the server pick its default.
+size_t workers(const Options& options) {
+  return options.contains("--workers")
+             ? parse_number<size_t>(required(options, "--workers"), "--workers", 1)
+             : 0;
+}
+
 int run_prepare(int argc, char** argv) {
   const auto options = parse_options(argc, argv, {"--input", "--output", "--shards"});
   const std::filesystem::path input = required(options, "--input");
@@ -99,23 +114,15 @@ kretrieve::InvertedIndex load_index(const std::filesystem::path& stats_path,
   return kretrieve::InvertedIndex(documents, std::move(stats));  // document text is dropped here
 }
 
-int run_shard(int argc, char** argv) {
-  const auto options = parse_options(
-      argc, argv, {"--stats", "--partition", "--port", "--host", "--max-connections", "--workers"});
-  const auto stats = required(options, "--stats");
-  const auto partition = required(options, "--partition");
+// Serve frames with handler until SIGINT/SIGTERM. Reads --host, --port,
+// --max-connections, --workers.
+int serve(const kretrieve::RequestHandler& handler, const Options& options) {
   const auto port = parse_number<uint16_t>(required(options, "--port"), "--port", 0);
   const auto host = optional(options, "--host", "127.0.0.1");
-  const auto max_connections =
-      parse_number<size_t>(optional(options, "--max-connections", "64"), "--max-connections", 1);
-  const auto workers = options.contains("--workers")
-                           ? parse_number<size_t>(required(options, "--workers"), "--workers", 1)
-                           : 0;
-
-  const auto index = load_index(stats, partition);
   auto listener = kretrieve::listen_tcp(host, port);
   const auto bound_port = kretrieve::local_port(listener.get());
-  kretrieve::ShardServer server(index, std::move(listener), max_connections, workers);
+  kretrieve::ShardServer server(handler, std::move(listener), max_connections(options),
+                                workers(options));
 
   g_server = &server;
   struct sigaction action {};
@@ -134,6 +141,40 @@ int run_shard(int argc, char** argv) {
   }
   g_server = nullptr;
   return 0;
+}
+
+int run_shard(int argc, char** argv) {
+  const auto options = parse_options(
+      argc, argv, {"--stats", "--partition", "--port", "--host", "--max-connections", "--workers"});
+  const auto stats = required(options, "--stats");
+  const auto partition = required(options, "--partition");
+  // Validate the remaining options before the slow index build.
+  parse_number<uint16_t>(required(options, "--port"), "--port", 0);
+  max_connections(options);
+  workers(options);
+
+  const auto index = load_index(stats, partition);
+  return serve(
+      [&index](const kretrieve::Frame& request) {
+        return kretrieve::handle_request(index, request);
+      },
+      options);
+}
+
+int run_coordinator(int argc, char** argv) {
+  const auto options =
+      parse_options(argc, argv, {"--shards", "--port", "--host", "--max-connections", "--workers"});
+  const auto shards = kretrieve::parse_shard_list(required(options, "--shards"));
+  // Same default as ShardServer: min(connection cap, CPU count) workers serve queries at once.
+  const size_t concurrent =
+      workers(options) != 0 ? workers(options)
+                            : std::min(max_connections(options),
+                                       size_t{std::max(1u, std::thread::hardware_concurrency())});
+  // One fan-out thread per shard per concurrently served query.
+  kretrieve::Coordinator coordinator(shards, shards.size() * concurrent);
+  return serve(
+      [&coordinator](const kretrieve::Frame& request) { return coordinator.handle(request); },
+      options);
 }
 
 int run_query(int argc, char** argv) {
@@ -185,8 +226,7 @@ int main(int argc, char** argv) {
   } else if (role == "query") {
     run = run_query;
   } else if (role == "coordinator") {
-    std::fprintf(stderr, "coordinator: not implemented yet (plan day 3)\n");
-    return 1;
+    run = run_coordinator;
   } else {
     return usage(argv[0]);
   }

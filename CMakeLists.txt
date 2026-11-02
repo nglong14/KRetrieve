@@ -13,6 +13,7 @@ option(KRETRIEVE_ASAN "Build with AddressSanitizer + UBSan" OFF)
 option(KRETRIEVE_TSAN "Build with ThreadSanitizer" OFF)
 
 add_library(kretrieve_core
+  src/coordinator.cpp
   src/corpus.cpp
   src/index.cpp
   src/net.cpp
@@ -48,6 +49,7 @@ if(BUILD_TESTING)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(kretrieve_tests
+    tests/coordinator_test.cpp
     tests/corpus_test.cpp
     tests/index_test.cpp
     tests/prepare_test.cpp
@@ -68,5 +70,8 @@ if(BUILD_TESTING)
   add_test(NAME ShardCli
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/shard_cli_test.sh"
       $<TARGET_FILE:kretrieve> "${CMAKE_CURRENT_BINARY_DIR}")
-  set_tests_properties(PrepareCli ShardCli PROPERTIES TIMEOUT 60)
+  add_test(NAME CoordinatorCli
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/coordinator_cli_test.sh"
+      $<TARGET_FILE:kretrieve> "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(PrepareCli ShardCli CoordinatorCli PROPERTIES TIMEOUT 60)
 endif()

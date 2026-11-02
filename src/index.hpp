@@ -23,6 +23,12 @@ struct SearchHit {
   double score = 0;
 };
 
+// Ranking order shared by shards and the coordinator: score desc, then doc id asc.
+inline bool ranks_before(const SearchHit& a, const SearchHit& b) {
+  if (a.score != b.score) return a.score > b.score;
+  return a.document_id < b.document_id;
+}
+
 class InvertedIndex {
  public:
   InvertedIndex(std::span<const Document> documents, GlobalStats global_stats);
