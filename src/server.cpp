@@ -57,12 +57,14 @@ Fd checked_fd(int fd, const char* operation) {
 // Runtime state is local to run(): unwinding also stops and joins a partially started pool.
 class Reactor {
  public:
-  Reactor(const RequestHandler& handler, Fd listener, int stop_fd, size_t cap)
+  // At most `limit` requests may be queued or running; the next one gets Overloaded.
+  Reactor(const RequestHandler& handler, Fd listener, int stop_fd, size_t cap, size_t limit)
       : handler_(handler),
         listener_(std::move(listener)),
         epoll_(checked_fd(epoll_create1(EPOLL_CLOEXEC), "epoll_create1")),
         completed_fd_(checked_fd(eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC), "eventfd")),
-        cap_(cap) {
+        cap_(cap),
+        limit_(limit) {
     const int flags = fcntl(listener_.get(), F_GETFL);
     if (flags < 0 || fcntl(listener_.get(), F_SETFL, flags | O_NONBLOCK) < 0) {
       throw std::system_error(errno, std::generic_category(), "nonblocking listener");
@@ -213,6 +215,17 @@ class Reactor {
       }
       auto decoded = decode_frame(buffer);
       if (decoded.status != DecodeStatus::Ok) return false;
+      if (pending_.size() + outstanding_ >= limit_) {
+        // Shed load in the I/O loop: reply now instead of queueing behind busy workers.
+        if (decoded.frame.type != MsgType::QueryRequest) return false;
+        const QueryResponse busy{ResponseStatus::Overloaded, {}, {}};
+        buffer =
+            encode_frame({MsgType::QueryResponse, decoded.frame.req_id, encode_response(busy)});
+        connection.offset = 0;
+        connection.phase = Phase::Writing;
+        watch(EPOLL_CTL_MOD, connection.fd.get(), EPOLLOUT, id);
+        return true;
+      }
       pending_.push_back({id, std::move(decoded.frame), Clock::now(), {}});
       std::vector<uint8_t>().swap(buffer);  // do not retain large request buffers
       connection.offset = 0;
@@ -314,6 +327,7 @@ class Reactor {
   Fd epoll_;
   Fd completed_fd_;
   size_t cap_;
+  size_t limit_;
   uint64_t next_id_ = 3;
   std::unordered_map<uint64_t, Connection> connections_;
   std::list<Job> pending_;
@@ -332,22 +346,23 @@ class Reactor {
 }  // namespace
 
 FrameServer::FrameServer(const InvertedIndex& index, Fd listener, size_t max_connections,
-                         size_t workers)
+                         size_t workers, size_t max_queue)
     : FrameServer(
           [&index](const Frame& request, Clock::time_point received) {
             return handle_request(index, request, received);
           },
-          std::move(listener), max_connections, workers) {}
+          std::move(listener), max_connections, workers, max_queue) {}
 
 FrameServer::FrameServer(RequestHandler handler, Fd listener, size_t max_connections,
-                         size_t workers)
+                         size_t workers, size_t max_queue)
     : handler_(std::move(handler)),
       listener_(std::move(listener)),
       max_connections_(max_connections),
       worker_count_(
           workers == 0
               ? std::min(max_connections, size_t{std::max(1u, std::thread::hardware_concurrency())})
-              : workers) {
+              : workers),
+      max_queue_(max_queue) {
   if (max_connections == 0) throw std::invalid_argument("max_connections must be positive");
   int fds[2];
   if (pipe2(fds, O_CLOEXEC | O_NONBLOCK) != 0) {
@@ -366,7 +381,8 @@ void FrameServer::stop() {
 }
 
 void FrameServer::run() {
-  Reactor reactor(handler_, std::move(listener_), stop_read_.get(), max_connections_);
+  Reactor reactor(handler_, std::move(listener_), stop_read_.get(), max_connections_,
+                  worker_count_ + max_queue_);
   reactor.run(worker_count_);
 }
 

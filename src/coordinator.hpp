@@ -41,6 +41,7 @@ class Coordinator {
   // Thread-safe. Same contract as handle_request: nullopt closes the client connection.
   // The deadline is received + budget_us. Shards that fail or miss it are left out
   // and listed in missing_shards (by index in the shard list); the reply is still Ok.
+  // A request whose deadline passed before fan-out (it waited in the queue) gets Overloaded.
   std::optional<Frame> handle(const Frame& request, Clock::time_point received = Clock::now());
 
  private:

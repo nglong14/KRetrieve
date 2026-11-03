@@ -16,6 +16,7 @@ add_library(kretrieve_core
   src/coordinator.cpp
   src/corpus.cpp
   src/index.cpp
+  src/loadgen.cpp
   src/net.cpp
   src/prepare.cpp
   src/protocol.cpp
@@ -52,6 +53,7 @@ if(BUILD_TESTING)
     tests/coordinator_test.cpp
     tests/corpus_test.cpp
     tests/index_test.cpp
+    tests/loadgen_test.cpp
     tests/prepare_test.cpp
     tests/protocol_test.cpp
     tests/server_test.cpp

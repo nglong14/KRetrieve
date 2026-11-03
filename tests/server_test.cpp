@@ -9,10 +9,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <barrier>
 #include <cerrno>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -368,4 +370,66 @@ TEST(FrameServer, RecoversAfterDescriptorExhaustion) {
   const auto reply = read_frame(waiting.get());
   ASSERT_TRUE(reply);  // listener retries after descriptors become available
   EXPECT_EQ(reply->req_id, 2u);
+}
+
+TEST(FrameServer, FullQueueRepliesOverloadedAndKeepsConnection) {
+  const InvertedIndex index(kCorpus, compute_global_stats(kCorpus));
+  std::promise<void> entered;
+  std::promise<void> release;
+  const std::shared_future<void> released = release.get_future().share();
+  std::atomic<int> calls{0};
+  auto listener = listen_tcp("127.0.0.1", 0);
+  const uint16_t port = local_port(listener.get());
+  // One worker, one queue slot: the third concurrent request must be shed.
+  FrameServer server(
+      [&](const Frame& request, Clock::time_point received) {
+        if (calls.fetch_add(1) == 0) entered.set_value();
+        released.wait();
+        return handle_request(index, request, received);
+      },
+      std::move(listener), 64, /*workers=*/1, /*max_queue=*/1);
+  std::thread serving([&server] { server.run(); });
+  // Unblock the worker and join even if an assertion below fails.
+  struct Cleanup {
+    std::promise<void>& release;
+    FrameServer& server;
+    std::thread& serving;
+    ~Cleanup() {
+      try {
+        release.set_value();
+      } catch (const std::future_error&) {
+      }
+      server.stop();
+      serving.join();
+    }
+  } cleanup{release, server, serving};
+
+  const auto ask = [](const Fd& fd, uint64_t id) -> std::optional<QueryResponse> {
+    if (!send_all(fd.get(), encode_frame(request_frame(id, "cat")))) return std::nullopt;
+    const auto reply = read_frame(fd.get(), Clock::now() + std::chrono::seconds(5));
+    if (!reply || reply->req_id != id) return std::nullopt;
+    return decode_response(reply->body);
+  };
+  const auto running = connect_tcp("127.0.0.1", port);
+  const auto queued = connect_tcp("127.0.0.1", port);
+  const auto shed = connect_tcp("127.0.0.1", port);
+  ASSERT_TRUE(send_all(running.get(), encode_frame(request_frame(1, "cat"))));
+  entered.get_future().wait();
+  ASSERT_TRUE(send_all(queued.get(), encode_frame(request_frame(2, "cat"))));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));  // let the server queue it
+
+  const auto busy = ask(shed, 3);  // answered while the worker is still blocked
+  ASSERT_TRUE(busy);
+  EXPECT_EQ(busy->status, ResponseStatus::Overloaded);
+  EXPECT_TRUE(busy->hits.empty());
+
+  release.set_value();
+  for (const auto* fd : {&running, &queued}) {
+    const auto reply = read_frame(fd->get(), Clock::now() + std::chrono::seconds(5));
+    ASSERT_TRUE(reply);
+    EXPECT_EQ(decode_response(reply->body)->status, ResponseStatus::Ok);
+  }
+  const auto later = ask(shed, 4);  // the shed connection still works
+  ASSERT_TRUE(later);
+  EXPECT_EQ(later->status, ResponseStatus::Ok);
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end: prepare 3 shards -> 3 shard processes + coordinator -> query matches 1 shard,
-# then kill a shard and expect a partial result.
+# then kill a shard, and slow one down, and expect partial results.
 # Usage: coordinator_cli_test.sh <kretrieve-binary> <scratch-parent-dir>
 set -euo pipefail
 
@@ -59,6 +59,26 @@ expected=$'1\t20\t0.523548346502\n2\t30\t0.447138587823'
 [[ $actual == "$expected" ]] || fail "unexpected partial hits:"$'\n'"$actual"
 grep -qx 'incomplete: missing shards 1' "$root/query.err" ||
   fail "missing incomplete flag: $(cat "$root/query.err")"
+
+# A slow shard (--latency-ms) misses a 100 ms budget: same partial result as a dead one.
+start slow shard --stats "$root/prepared/global_stats.bin" \
+  --partition "$root/prepared/shard-1.tsv" --latency-ms 300
+start coordinator2 coordinator --workers 2 \
+  --shards "127.0.0.1:${ports[0]},127.0.0.1:$port,127.0.0.1:${ports[2]}"
+actual=$("$bin" query --port "$port" --k 10 --query "cat dog" --budget-us 100000 \
+  2>"$root/slow.err") || fail "slow-shard query failed"
+[[ $actual == "$expected" ]] || fail "unexpected slow-shard hits:"$'\n'"$actual"
+grep -qx 'incomplete: missing shards 1' "$root/slow.err" ||
+  fail "missing incomplete flag for slow shard: $(cat "$root/slow.err")"
+# Bad latency flags are usage errors (exit 2), rejected before any file is read.
+expect_usage() {
+  local rc=0
+  "$bin" "$@" >/dev/null 2>&1 || rc=$?
+  [[ $rc == 2 ]] || fail "expected usage error from: $* (got $rc)"
+}
+expect_usage shard --stats x --partition y --port 0 --latency-ms 5-1
+expect_usage shard --stats x --partition y --port 0 --latency-ms 5 --latency-prob 2
+expect_usage shard --stats x --partition y --port 0 --latency-prob 0.5
 
 kill -TERM "${pids[3]}"
 wait "${pids[3]}" || fail "coordinator did not exit cleanly on SIGTERM"

@@ -60,6 +60,7 @@ enum class ResponseStatus : uint8_t {
   Ok = 0,
   BadRequest = 1,
   InternalError = 2,
+  Overloaded = 3,  // the server's queue is full or the request expired while queued
 };
 
 struct QueryRequest {
