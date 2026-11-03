@@ -95,8 +95,10 @@ std::optional<Frame> Coordinator::handle(const Frame& request, Clock::time_point
   const auto deadline = received + budget;
 
   // Shards get what is left of the budget so they can drop work we stopped waiting for.
+  // Nothing left means the request waited out its budget in our queue: shed it.
   const auto left = std::chrono::duration_cast<microseconds>(deadline - Clock::now());
-  query->budget_us = static_cast<uint64_t>(std::max<int64_t>(left.count(), 1));
+  if (left.count() <= 0) return reply(request.req_id, {ResponseStatus::Overloaded, {}, {}});
+  query->budget_us = static_cast<uint64_t>(left.count());
 
   // Our own id on every shard request; replies carrying another id are rejected.
   const uint64_t req_id = next_req_id_.fetch_add(1, std::memory_order_relaxed);

@@ -209,9 +209,11 @@ Idle clients and slow readers do not occupy a worker.
 
 Connections are persistent and handle one request at a time, in order, including
 pipelined requests. Reading pauses until the current response has been written.
-Admitted jobs (queued, executing, or awaiting completion delivery) are bounded by
-the connection cap; additional complete requests wait in FIFO order without
-blocking the I/O loop. Each connection holds at most one request or response,
+**Backpressure:** at most `--workers` requests run and at most `--max-queue`
+(default 16) wait for a worker. A request that arrives when both are full gets an
+immediate `Overloaded` reply from the I/O loop, and its connection stays open.
+Fast rejection keeps latency bounded under overload instead of letting a queue
+grow. Each connection holds at most one request or response,
 so memory scales with the connection cap and the 16 MiB maximum frame body.
 Extra connections are accepted and closed immediately. Descriptor exhaustion
 temporarily pauses accepting while existing connections continue to be served.
@@ -221,6 +223,10 @@ The server records when it reads each request. A shard drops a request whose
 connection without replying, because the coordinator has already stopped
 waiting. A `budget_us` of 0 means no deadline. There is no idle timeout: an idle
 client holds its connection slot until it disconnects.
+
+For experiments, `--latency-ms A-B --latency-prob P` makes a shard sleep a
+random A–B ms before a fraction P of its searches (P defaults to 1; `--latency-ms A`
+means exactly A). The sleep holds a worker, like a slow disk would.
 
 ### Message bodies
 
@@ -233,7 +239,8 @@ response echoes the request's `req_id`.
 | `QueryRequest` (type 1) | `u32 k` (≤ 100000), `u64 budget_us`, `u32 query_len`, query bytes |
 | `QueryResponse` (type 2) | `u8 status`, `u32 hit_count`, then per hit `u64 doc_id`, `f64 score`, then `u32 missing_count`, then per missing shard `u32 shard_index` |
 
-Status is `0` Ok, `1` BadRequest, `2` InternalError. Hits follow the ranking
+Status is `0` Ok, `1` BadRequest, `2` InternalError, `3` Overloaded (the
+server's queue was full, or the request's budget ran out while it waited). Hits follow the ranking
 contract above. `budget_us` is the time budget in microseconds (see the
 coordinator section). A non-empty missing-shard list means the result is
 incomplete; shards always send an empty list.
@@ -258,14 +265,15 @@ done
 
 The coordinator speaks the same protocol as a shard, so `query` works against
 either. It reuses the shard's epoll front end (`--host`, `--max-connections`,
-`--workers` mean the same thing). For each query it:
+`--workers`, `--max-queue` mean the same thing). For each query it:
 
 1. assigns its own `req_id` (an atomic counter) and sends it to every shard;
    a reply with any other `req_id` counts as a failed shard. The client's own
    `req_id` is echoed back to the client.
 2. sets a deadline of receive time + `budget_us` (0 means a 1-second default;
    budgets are capped at 60 seconds) and forwards the remaining budget to each
-   shard.
+   shard. If the budget already ran out while the request was queued, it
+   replies `Overloaded` without contacting any shard.
 3. fans out through a fixed thread pool of `shards × workers` threads, so a
    full set of workers never waits for a fan-out thread. Each task opens a new
    TCP connection, sends the request, and reads the reply. Connecting and
@@ -287,6 +295,43 @@ carries the other shards' hits, and lists the missing shards by their position i
 
 The failure model is crash-stop: a shard either answers correctly or does not
 answer in time. Replicas and hedged requests are planned next.
+
+## Benchmarks
+
+`kretrieve loadgen` is an open-loop load generator. Request *i* is scheduled at
+`i / qps` seconds whether or not earlier requests have finished. Latency is
+measured from that *scheduled* time, so time spent waiting for a free connection
+counts (no coordinated omission). It writes one CSV row per request
+(`seq,due_us,latency_us,status,missing,hits`) and prints a summary:
+
+```bash
+./build/kretrieve loadgen --port 8000 --qps 500 --duration 10 \
+  --queries bench/data/queries.txt --budget-us 200000 --out run.csv
+# loadgen: sent=5000 ok=5000 incomplete=0 overloaded=0 errors=0 ok p50=4.76ms ...
+```
+
+`scripts/bench.sh` runs a full sweep. It generates a seeded synthetic corpus
+(100k documents with a Zipf-distributed vocabulary, via `scripts/gen_corpus.py`),
+prepares 3 shards, starts the shards and a coordinator (`--workers 8
+--max-queue 16`), and runs `loadgen` at each rate:
+
+```bash
+scripts/bench.sh baseline
+scripts/bench.sh slow --latency-ms 20-100 --latency-prob 0.1   # flags go to every shard
+python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt
+.venv/bin/python scripts/plot.py   # writes bench/latency.png and bench/summary.csv
+```
+
+![Latency and failure rate against offered load](bench/latency.png)
+
+Percentiles cover `Ok` replies only, because shed requests return almost
+instantly and would hide the tail. With no injected latency, p99 stays near
+10 ms up to 250 queries/s. Between 500 and 1000 queries/s the coordinator starts to shed load
+as `Overloaded`, and latency stays bounded instead of growing with the queue.
+When 10% of shard searches take an extra 20–100 ms, p99 rises to about 100 ms
+even at low load: each query waits for its slowest shard. Hedged requests target
+exactly this tail. All processes share one machine, so treat the numbers as
+relative; exact data is in `bench/summary.csv`.
 
 ## Non-goals
 

@@ -12,3 +12,8 @@ compile_commands.json
 
 # Private notes and plans (not published)
 docs/
+
+# Benchmark inputs and raw results (bench/latency.png and bench/summary.csv are committed)
+bench/data/
+bench/results/
+.venv/

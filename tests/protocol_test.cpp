@@ -173,6 +173,9 @@ TEST(MessageCodec, ResponseRoundTripIsBitExact) {
   const auto error = decode_response(encode_response({ResponseStatus::BadRequest, {}, {}}));
   ASSERT_TRUE(error);
   EXPECT_EQ(error->status, ResponseStatus::BadRequest);
+  const auto busy = decode_response(encode_response({ResponseStatus::Overloaded, {}, {}}));
+  ASSERT_TRUE(busy);
+  EXPECT_EQ(busy->status, ResponseStatus::Overloaded);
 }
 
 TEST(MessageCodec, RejectsMalformedResponses) {
@@ -183,7 +186,7 @@ TEST(MessageCodec, RejectsMalformedResponses) {
   trailing.push_back(0);
   EXPECT_FALSE(decode_response(trailing));
   auto bad_status = wire;
-  bad_status[0] = 3;
+  bad_status[0] = 4;
   EXPECT_FALSE(decode_response(bad_status));
   const auto partial = encode_response({ResponseStatus::Ok, {}, {1, 2}});
   EXPECT_FALSE(decode_response(std::span<const uint8_t>(partial).first(partial.size() - 4)));

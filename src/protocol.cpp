@@ -120,7 +120,7 @@ std::vector<uint8_t> encode_response(const QueryResponse& response) {
 
 std::optional<QueryResponse> decode_response(std::span<const uint8_t> body) {
   if (body.size() < kResponseHeaderSize) return std::nullopt;
-  if (body[0] > static_cast<uint8_t>(ResponseStatus::InternalError)) return std::nullopt;
+  if (body[0] > static_cast<uint8_t>(ResponseStatus::Overloaded)) return std::nullopt;
   const uint32_t count = get_u32(body.data() + 1);
   const uint64_t missing_at = kResponseHeaderSize + uint64_t{count} * kHitSize;
   if (count > kMaxK || body.size() < missing_at + 4) return std::nullopt;

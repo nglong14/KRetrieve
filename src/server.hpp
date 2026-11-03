@@ -24,10 +24,15 @@ using RequestHandler = std::function<std::optional<Frame>(const Frame&, Clock::t
 // Frame server used by both shards and the coordinator.
 class FrameServer {
  public:
-  // workers=0 selects min(connection cap, CPU count).
-  FrameServer(RequestHandler handler, Fd listener, size_t max_connections, size_t workers = 0);
+  static constexpr size_t kDefaultMaxQueue = 16;
+
+  // workers=0 selects min(connection cap, CPU count). Once `max_queue` requests are
+  // waiting for a busy worker, further requests get an immediate Overloaded reply.
+  FrameServer(RequestHandler handler, Fd listener, size_t max_connections, size_t workers = 0,
+              size_t max_queue = kDefaultMaxQueue);
   // index must outlive the server.
-  FrameServer(const InvertedIndex& index, Fd listener, size_t max_connections, size_t workers = 0);
+  FrameServer(const InvertedIndex& index, Fd listener, size_t max_connections, size_t workers = 0,
+              size_t max_queue = kDefaultMaxQueue);
   FrameServer(const FrameServer&) = delete;
   FrameServer& operator=(const FrameServer&) = delete;
 
@@ -43,6 +48,7 @@ class FrameServer {
   Fd stop_write_;
   size_t max_connections_;
   size_t worker_count_;
+  size_t max_queue_;
 };
 
 }  // namespace kretrieve

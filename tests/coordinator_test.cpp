@@ -142,6 +142,23 @@ TEST(Coordinator, DeadShardYieldsPartialResult) {
   expect_same_hits(response->hits, InvertedIndex(kCorpus, cluster.stats).search("cat", 10));
 }
 
+TEST(Coordinator, RequestThatExpiredInTheQueueIsShed) {
+  ShardAddress nowhere{"127.0.0.1", 0};
+  {
+    auto closed = listen_tcp("127.0.0.1", 0);  // no shard may be contacted
+    nowhere.port = local_port(closed.get());
+  }
+  Coordinator coordinator({nowhere}, 1);
+  const Frame request{MsgType::QueryRequest, 9, encode_request({10, 1'000'000, "cat"})};
+  const auto reply = coordinator.handle(request, Clock::now() - std::chrono::seconds(2));
+  ASSERT_TRUE(reply);
+  EXPECT_EQ(reply->req_id, 9u);
+  const auto response = decode_response(reply->body);
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, ResponseStatus::Overloaded);
+  EXPECT_TRUE(response->missing_shards.empty());  // shed before fan-out
+}
+
 // Day-4 exit criterion: a shard that never answers is cut off at the deadline,
 // its socket is closed (cancellation), and the rest of the answer comes back flagged.
 TEST(Coordinator, SlowShardExcludedAndFlaggedIncomplete) {

@@ -1,6 +1,7 @@
 // Command-line entry point and role selection.
 #include "coordinator.hpp"
 #include "index.hpp"
+#include "loadgen.hpp"
 #include "net.hpp"
 #include "prepare.hpp"
 #include "protocol.hpp"
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <exception>
@@ -16,10 +18,13 @@
 #include <fstream>
 #include <initializer_list>
 #include <map>
+#include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -30,9 +35,14 @@ int usage(const char* argv0) {
                "  prepare --input <corpus.tsv> --output <new-directory> --shards <N>\n"
                "  shard --stats <global_stats.bin> --partition <shard-N.tsv> --port <P>\n"
                "        [--host 127.0.0.1] [--max-connections 64] [--workers <N>]\n"
+               "        [--max-queue 16] [--latency-ms <A>[-<B>]] [--latency-prob 1]\n"
                "  query --port <P> --query <text> [--host 127.0.0.1] [--k 10] [--budget-us 0]\n"
                "  coordinator --shards <host:port,...> --port <P>\n"
-               "        [--host 127.0.0.1] [--max-connections 64] [--workers <N>]\n",
+               "        [--host 127.0.0.1] [--max-connections 64] [--workers <N>]\n"
+               "        [--max-queue 16]\n"
+               "  loadgen --port <P> --qps <N> --duration <seconds> --queries <file>\n"
+               "        --out <results.csv> [--host 127.0.0.1] [--k 10] [--budget-us 0]\n"
+               "        [--connections 32]\n",
                argv0);
   return 2;
 }
@@ -89,6 +99,44 @@ size_t workers(const Options& options) {
              : 0;
 }
 
+size_t max_queue(const Options& options) {
+  return parse_number<size_t>(
+      optional(options, "--max-queue", std::to_string(kretrieve::FrameServer::kDefaultMaxQueue)),
+      "--max-queue", 0);
+}
+
+// Injected shard latency for experiments: with probability `prob`, sleep min_ms..max_ms.
+struct InjectedLatency {
+  uint32_t min_ms = 0;
+  uint32_t max_ms = 0;
+  double prob = 1;
+};
+
+// Parses --latency-ms <A> or <A>-<B> and --latency-prob <P>; nullopt when not requested.
+std::optional<InjectedLatency> injected_latency(const Options& options) {
+  if (!options.contains("--latency-ms")) {
+    if (options.contains("--latency-prob")) {
+      throw std::invalid_argument("--latency-prob needs --latency-ms");
+    }
+    return std::nullopt;
+  }
+  const std::string range = required(options, "--latency-ms");
+  const auto dash = range.find('-');
+  InjectedLatency latency;
+  latency.min_ms = parse_number<uint32_t>(range.substr(0, dash), "--latency-ms", 0);
+  latency.max_ms = dash == std::string::npos
+                       ? latency.min_ms
+                       : parse_number<uint32_t>(range.substr(dash + 1), "--latency-ms", 0);
+  if (latency.max_ms < latency.min_ms) throw std::invalid_argument("--latency-ms needs A <= B");
+  const std::string prob = optional(options, "--latency-prob", "1");
+  const auto parsed = std::from_chars(prob.data(), prob.data() + prob.size(), latency.prob);
+  if (parsed.ec != std::errc{} || parsed.ptr != prob.data() + prob.size() || !(latency.prob >= 0) ||
+      latency.prob > 1) {
+    throw std::invalid_argument("--latency-prob must be a number in [0, 1]");
+  }
+  return latency;
+}
+
 int run_prepare(int argc, char** argv) {
   const auto options = parse_options(argc, argv, {"--input", "--output", "--shards"});
   const std::filesystem::path input = required(options, "--input");
@@ -115,14 +163,14 @@ kretrieve::InvertedIndex load_index(const std::filesystem::path& stats_path,
 }
 
 // Serve frames with handler until SIGINT/SIGTERM. Reads --host, --port,
-// --max-connections, --workers.
+// --max-connections, --workers, --max-queue.
 int serve(const kretrieve::RequestHandler& handler, const Options& options) {
   const auto port = parse_number<uint16_t>(required(options, "--port"), "--port", 0);
   const auto host = optional(options, "--host", "127.0.0.1");
   auto listener = kretrieve::listen_tcp(host, port);
   const auto bound_port = kretrieve::local_port(listener.get());
   kretrieve::FrameServer server(handler, std::move(listener), max_connections(options),
-                                workers(options));
+                                workers(options), max_queue(options));
 
   g_server = &server;
   struct sigaction action {};
@@ -144,26 +192,39 @@ int serve(const kretrieve::RequestHandler& handler, const Options& options) {
 }
 
 int run_shard(int argc, char** argv) {
-  const auto options = parse_options(
-      argc, argv, {"--stats", "--partition", "--port", "--host", "--max-connections", "--workers"});
+  const auto options =
+      parse_options(argc, argv,
+                    {"--stats", "--partition", "--port", "--host", "--max-connections", "--workers",
+                     "--max-queue", "--latency-ms", "--latency-prob"});
   const auto stats = required(options, "--stats");
   const auto partition = required(options, "--partition");
   // Validate the remaining options before the slow index build.
   parse_number<uint16_t>(required(options, "--port"), "--port", 0);
   max_connections(options);
   workers(options);
+  max_queue(options);
+  const auto latency = injected_latency(options);
 
   const auto index = load_index(stats, partition);
   return serve(
-      [&index](const kretrieve::Frame& request, kretrieve::Clock::time_point received) {
+      [&index, latency](const kretrieve::Frame& request, kretrieve::Clock::time_point received) {
+        if (latency) {
+          // Blocks this worker on purpose, like a slow disk would.
+          thread_local std::mt19937 rng{std::random_device{}()};
+          if (std::bernoulli_distribution(latency->prob)(rng)) {
+            std::uniform_int_distribution<uint32_t> ms(latency->min_ms, latency->max_ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms(rng)));
+          }
+        }
         return kretrieve::handle_request(index, request, received);
       },
       options);
 }
 
 int run_coordinator(int argc, char** argv) {
-  const auto options =
-      parse_options(argc, argv, {"--shards", "--port", "--host", "--max-connections", "--workers"});
+  const auto options = parse_options(
+      argc, argv,
+      {"--shards", "--port", "--host", "--max-connections", "--workers", "--max-queue"});
   const auto shards = kretrieve::parse_shard_list(required(options, "--shards"));
   // Same default as FrameServer: min(connection cap, CPU count) workers serve queries at once.
   const size_t concurrent =
@@ -202,8 +263,10 @@ int run_query(int argc, char** argv) {
   const auto response = kretrieve::decode_response(reply->body);
   if (!response) throw std::runtime_error("malformed response body");
   if (response->status != kretrieve::ResponseStatus::Ok) {
-    std::fprintf(stderr, "query: shard returned status %u\n",
-                 static_cast<unsigned>(response->status));
+    static constexpr const char* kNames[] = {"ok", "bad request", "internal error", "overloaded"};
+    std::fprintf(stderr, "query: server returned status %u (%s)\n",
+                 static_cast<unsigned>(response->status),
+                 kNames[static_cast<size_t>(response->status)]);
     return 1;
   }
   if (!response->missing_shards.empty()) {
@@ -218,6 +281,41 @@ int run_query(int argc, char** argv) {
                 static_cast<unsigned long long>(response->hits[i].document_id),
                 response->hits[i].score);
   }
+  return 0;
+}
+
+int run_loadgen(int argc, char** argv) {
+  const auto options = parse_options(argc, argv,
+                                     {"--host", "--port", "--qps", "--duration", "--queries",
+                                      "--out", "--k", "--budget-us", "--connections"});
+  kretrieve::LoadConfig config;
+  config.host = optional(options, "--host", "127.0.0.1");
+  config.port = parse_number<uint16_t>(required(options, "--port"), "--port", 1);
+  config.qps = parse_number<uint32_t>(required(options, "--qps"), "--qps", 1);
+  config.duration = std::chrono::seconds(
+      parse_number<uint32_t>(required(options, "--duration"), "--duration", 1));
+  config.k = parse_number<uint32_t>(optional(options, "--k", "10"), "--k", 0);
+  config.budget_us =
+      parse_number<uint64_t>(optional(options, "--budget-us", "0"), "--budget-us", 0);
+  config.connections =
+      parse_number<size_t>(optional(options, "--connections", "32"), "--connections", 1);
+
+  const std::string queries_path = required(options, "--queries");
+  std::ifstream queries(queries_path);
+  if (!queries) throw std::runtime_error("cannot open queries: " + queries_path);
+  for (std::string line; std::getline(queries, line);) {
+    if (!line.empty()) config.queries.push_back(line);
+  }
+  if (config.queries.empty()) throw std::runtime_error("no queries in " + queries_path);
+  const std::string out_path = required(options, "--out");
+  std::ofstream out(out_path);
+  if (!out) throw std::runtime_error("cannot write " + out_path);
+
+  const auto samples = kretrieve::run_load(config);
+  kretrieve::write_csv(out, samples);
+  out.close();
+  if (!out) throw std::runtime_error("failed writing " + out_path);
+  std::fprintf(stderr, "loadgen: %s\n", kretrieve::summarize(samples).c_str());
   return 0;
 }
 
@@ -236,6 +334,8 @@ int main(int argc, char** argv) {
     run = run_query;
   } else if (role == "coordinator") {
     run = run_coordinator;
+  } else if (role == "loadgen") {
+    run = run_loadgen;
   } else {
     return usage(argv[0]);
   }
