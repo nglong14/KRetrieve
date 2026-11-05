@@ -32,8 +32,10 @@ std::vector<SearchHit> merge_top_k(std::span<const std::vector<SearchHit>> shard
 class Coordinator {
  public:
   // pool_threads should be at least shards x concurrent queries, so fan-out never queues.
+  // replicas: empty, or one per shard. hedge_after > 0 (needs replicas) also sends the
+  // query to the replica when the primary has not answered by then; first Ok reply wins.
   Coordinator(std::vector<ShardAddress> shards, size_t pool_threads,
-              std::vector<ShardAddress> replicas = {});
+              std::vector<ShardAddress> replicas = {}, std::chrono::microseconds hedge_after = {});
 
   // ponytail: fixed constants; make them flags when someone needs to tune them.
   static constexpr std::chrono::microseconds kDefaultBudget{1'000'000};  // client sent 0
@@ -46,8 +48,14 @@ class Coordinator {
   std::optional<Frame> handle(const Frame& request, Clock::time_point received = Clock::now());
 
  private:
+  // One logical shard: primary, then its replica on failure or after hedge_after_.
+  // Returns by the deadline; nullopt when no copy gave an Ok reply.
+  std::optional<QueryResponse> ask_shard(size_t i, uint64_t req_id, const QueryRequest& query,
+                                         Clock::time_point deadline) const;
+
   std::vector<ShardAddress> shards_;
   std::vector<ShardAddress> replicas_;
+  std::chrono::microseconds hedge_after_;
   std::atomic<uint64_t> next_req_id_{1};
   ThreadPool pool_;  // last: its destructor joins tasks that read shards_
 };

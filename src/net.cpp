@@ -15,9 +15,7 @@
 #include <vector>
 
 namespace kretrieve {
-namespace {
 
-// Milliseconds left, rounded up so we never poll(0) before the deadline; -1 = no deadline.
 int remaining_ms(Deadline deadline) {
   if (!deadline) return -1;
   const auto left = *deadline - Clock::now();
@@ -25,6 +23,8 @@ int remaining_ms(Deadline deadline) {
   const auto ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
   return static_cast<int>(std::min<decltype(ms)>(ms, std::numeric_limits<int>::max()));
 }
+
+namespace {
 
 // Try each resolved address until one binds+listens (server) or connects (client).
 Fd open_tcp(const std::string& host, uint16_t port, bool server, Deadline deadline) {

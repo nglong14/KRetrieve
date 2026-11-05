@@ -97,8 +97,9 @@ grep -qx 'incomplete: missing shards 1' "$root/query.err" ||
 # A slow shard (--latency-ms) misses a 100 ms budget: same partial result as a dead one.
 start slow shard --stats "$root/prepared/global_stats.bin" \
   --partition "$root/prepared/shard-1.tsv" --latency-ms 300
+slow_port=$port
 start coordinator2 coordinator --workers 2 \
-  --shards "127.0.0.1:${ports[0]},127.0.0.1:$port,127.0.0.1:${ports[2]}" \
+  --shards "127.0.0.1:${ports[0]},127.0.0.1:$slow_port,127.0.0.1:${ports[2]}" \
   --replicas "127.0.0.1:${replica_ports[0]},127.0.0.1:${replica_ports[1]},127.0.0.1:${replica_ports[2]}"
 actual=$("$bin" query --port "$port" --k 10 --query "cat dog" --budget-us 100000 \
   2>"$root/slow.err") || fail "slow-shard query failed"
@@ -106,6 +107,20 @@ actual=$("$bin" query --port "$port" --k 10 --query "cat dog" --budget-us 100000
 grep -qx 'incomplete: missing shards 1' "$root/slow.err" ||
   fail "missing incomplete flag for slow shard: $(cat "$root/slow.err")"
 ! grep -q '^failover ' "$root/coordinator2.out" || fail "slow primary triggered failover"
+
+# Same slow primary with hedging to a live replica (replica 1 was killed above): the
+# replica answers in time, so the result is complete.
+start fast1 shard --stats "$root/prepared/global_stats.bin" \
+  --partition "$root/prepared/shard-1.tsv"
+start hedged coordinator --workers 2 --hedge-ms 10 \
+  --shards "127.0.0.1:${ports[0]},127.0.0.1:${slow_port},127.0.0.1:${ports[2]}" \
+  --replicas "127.0.0.1:${replica_ports[0]},127.0.0.1:$port,127.0.0.1:${replica_ports[2]}"
+expected=$'1\t10\t1.071445295349\n2\t20\t0.523548346502\n3\t30\t0.447138587823'
+actual=$("$bin" query --port "$port" --k 10 --query "cat dog" --budget-us 100000 \
+  2>"$root/hedged.err") || fail "hedged query failed"
+[[ $actual == "$expected" ]] || fail "unexpected hedged hits:"$'\n'"$actual"
+[[ ! -s $root/hedged.err ]] || fail "hedged query was incomplete: $(cat "$root/hedged.err")"
+
 # Bad latency flags are usage errors (exit 2), rejected before any file is read.
 expect_usage() {
   local rc=0
@@ -116,6 +131,8 @@ expect_usage shard --stats x --partition y --port 0 --latency-ms 5-1
 expect_usage shard --stats x --partition y --port 0 --latency-ms 5 --latency-prob 2
 expect_usage shard --stats x --partition y --port 0 --latency-prob 0.5
 expect_usage coordinator --port 0 --shards a:1,b:2 --replicas c:3
+expect_usage coordinator --port 0 --shards a:1 --hedge-ms 10
+expect_usage coordinator --port 0 --shards a:1 --replicas b:2 --hedge-ms 0
 
 kill -TERM "${pids[3]}"
 wait "${pids[3]}" || fail "coordinator did not exit cleanly on SIGTERM"

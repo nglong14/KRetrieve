@@ -37,6 +37,10 @@ class Fd {
 using Clock = std::chrono::steady_clock;
 using Deadline = std::optional<Clock::time_point>;  // nullopt = wait forever
 
+// poll() timeout: milliseconds left, rounded up so poll never returns before the
+// deadline; 0 once it has passed; -1 for no deadline.
+int remaining_ms(Deadline deadline);
+
 Fd listen_tcp(const std::string& host, uint16_t port);
 // Throws on failure, including when the deadline passes first.
 Fd connect_tcp(const std::string& host, uint16_t port, Deadline deadline = {});

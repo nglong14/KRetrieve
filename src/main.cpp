@@ -39,7 +39,7 @@ int usage(const char* argv0) {
                "  query --port <P> --query <text> [--host 127.0.0.1] [--k 10] [--budget-us 0]\n"
                "  coordinator --shards <host:port,...> --port <P>\n"
                "        [--host 127.0.0.1] [--max-connections 64] [--workers <N>]\n"
-               "        [--max-queue 16] [--replicas <host:port,...>]\n"
+               "        [--max-queue 16] [--replicas <host:port,...> [--hedge-ms <N>]]\n"
                "  loadgen --port <P> --qps <N> --duration <seconds> --queries <file>\n"
                "        --out <results.csv> [--host 127.0.0.1] [--k 10] [--budget-us 0]\n"
                "        [--connections 32]\n",
@@ -222,20 +222,25 @@ int run_shard(int argc, char** argv) {
 }
 
 int run_coordinator(int argc, char** argv) {
-  const auto options = parse_options(argc, argv,
-                                     {"--shards", "--replicas", "--port", "--host",
-                                      "--max-connections", "--workers", "--max-queue"});
+  const auto options =
+      parse_options(argc, argv,
+                    {"--shards", "--replicas", "--port", "--host", "--max-connections", "--workers",
+                     "--max-queue", "--hedge-ms"});
   const auto shards = kretrieve::parse_shard_list(required(options, "--shards"));
   const auto replicas = options.contains("--replicas")
                             ? kretrieve::parse_shard_list(required(options, "--replicas"))
                             : std::vector<kretrieve::ShardAddress>{};
+  const std::chrono::milliseconds hedge_after{
+      options.contains("--hedge-ms")
+          ? parse_number<uint32_t>(required(options, "--hedge-ms"), "--hedge-ms", 1)
+          : 0};
   // Same default as FrameServer: min(connection cap, CPU count) workers serve queries at once.
   const size_t concurrent =
       workers(options) != 0 ? workers(options)
                             : std::min(max_connections(options),
                                        size_t{std::max(1u, std::thread::hardware_concurrency())});
   // One fan-out thread per shard per concurrently served query.
-  kretrieve::Coordinator coordinator(shards, shards.size() * concurrent, replicas);
+  kretrieve::Coordinator coordinator(shards, shards.size() * concurrent, replicas, hedge_after);
   return serve(
       [&coordinator](const kretrieve::Frame& request, kretrieve::Clock::time_point received) {
         return coordinator.handle(request, received);
