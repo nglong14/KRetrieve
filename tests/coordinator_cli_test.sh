@@ -21,7 +21,7 @@ fail() {
 start() {
   local name=$1
   shift
-  "$bin" "$@" --port 0 >"$root/$name.out" &
+  "$bin" "$@" --port 0 >"$root/$name.out" 2>&1 &
   pids+=($!)
   for _ in $(seq 50); do
     grep -q '^listening on ' "$root/$name.out" && break
@@ -49,10 +49,44 @@ expected=$'1\t10\t1.071445295349\n2\t20\t0.523548346502\n3\t30\t0.447138587823'
 actual=$("$bin" query --port "$coord" --k 10 --query "cat dog")
 [[ $actual == "$expected" ]] || fail "unexpected hits:"$'\n'"$actual"
 
+# A replica of each logical shard uses the same prepared partition and stats.
+replica_ports=()
+for s in 0 1 2; do
+  start "replica$s" shard --stats "$root/prepared/global_stats.bin" \
+    --partition "$root/prepared/shard-$s.tsv"
+  replica_ports+=("$port")
+done
+start replicated coordinator --workers 2 \
+  --shards "127.0.0.1:${ports[0]},127.0.0.1:${ports[1]},127.0.0.1:${ports[2]}" \
+  --replicas "127.0.0.1:${replica_ports[0]},127.0.0.1:${replica_ports[1]},127.0.0.1:${replica_ports[2]}"
+replicated_coord=$port
+actual=$("$bin" query --port "$replicated_coord" --k 10 --query "cat dog")
+[[ $actual == "$expected" ]] || fail "unexpected replicated hits:"$'\n'"$actual"
+
+# Crash the primary. The replica must restore a complete answer and record failover.
+kill -KILL "${pids[1]}"
+wait "${pids[1]}" 2>/dev/null || true
+actual=$("$bin" query --port "$replicated_coord" --k 10 --query "cat dog" \
+  2>"$root/replicated.err") || fail "replica query failed"
+[[ $actual == "$expected" ]] || fail "unexpected failover hits:"$'\n'"$actual"
+grep -Eq '^failover shard=1 result=success failover_ms=[0-9]+\.[0-9]{3}$' \
+  "$root/replicated.out" || fail "missing failover log: $(cat "$root/replicated.out")"
+[[ ! -s $root/replicated.err ]] || fail "failover query was incomplete"
+
+# Both copies down: report logical shard 1 once.
+kill -KILL "${pids[5]}"
+wait "${pids[5]}" 2>/dev/null || true
+actual=$("$bin" query --port "$replicated_coord" --k 10 --query "cat dog" \
+  2>"$root/both-dead.err") || fail "both-dead query failed"
+expected=$'1\t20\t0.523548346502\n2\t30\t0.447138587823'
+[[ $actual == "$expected" ]] || fail "unexpected both-dead hits:"$'\n'"$actual"
+grep -qx 'incomplete: missing shards 1' "$root/both-dead.err" ||
+  fail "missing logical shard: $(cat "$root/both-dead.err")"
+grep -Eq '^failover shard=1 result=failure failover_ms=[0-9]+\.[0-9]{3}$' \
+  "$root/replicated.out" || fail "missing failed failover log"
+
 # A dead shard is left out: the surviving shards' hits come back, flagged incomplete.
 # prepare partitions by id % 3, so shard 1 holds doc 10.
-kill -TERM "${pids[1]}"
-wait "${pids[1]}" || fail "shard 1 did not exit cleanly"
 actual=$("$bin" query --port "$coord" --k 10 --query "cat dog" --budget-us 500000 \
   2>"$root/query.err") || fail "partial query failed"
 expected=$'1\t20\t0.523548346502\n2\t30\t0.447138587823'
@@ -64,12 +98,14 @@ grep -qx 'incomplete: missing shards 1' "$root/query.err" ||
 start slow shard --stats "$root/prepared/global_stats.bin" \
   --partition "$root/prepared/shard-1.tsv" --latency-ms 300
 start coordinator2 coordinator --workers 2 \
-  --shards "127.0.0.1:${ports[0]},127.0.0.1:$port,127.0.0.1:${ports[2]}"
+  --shards "127.0.0.1:${ports[0]},127.0.0.1:$port,127.0.0.1:${ports[2]}" \
+  --replicas "127.0.0.1:${replica_ports[0]},127.0.0.1:${replica_ports[1]},127.0.0.1:${replica_ports[2]}"
 actual=$("$bin" query --port "$port" --k 10 --query "cat dog" --budget-us 100000 \
   2>"$root/slow.err") || fail "slow-shard query failed"
 [[ $actual == "$expected" ]] || fail "unexpected slow-shard hits:"$'\n'"$actual"
 grep -qx 'incomplete: missing shards 1' "$root/slow.err" ||
   fail "missing incomplete flag for slow shard: $(cat "$root/slow.err")"
+! grep -q '^failover ' "$root/coordinator2.out" || fail "slow primary triggered failover"
 # Bad latency flags are usage errors (exit 2), rejected before any file is read.
 expect_usage() {
   local rc=0
@@ -79,6 +115,7 @@ expect_usage() {
 expect_usage shard --stats x --partition y --port 0 --latency-ms 5-1
 expect_usage shard --stats x --partition y --port 0 --latency-ms 5 --latency-prob 2
 expect_usage shard --stats x --partition y --port 0 --latency-prob 0.5
+expect_usage coordinator --port 0 --shards a:1,b:2 --replicas c:3
 
 kill -TERM "${pids[3]}"
 wait "${pids[3]}" || fail "coordinator did not exit cleanly on SIGTERM"

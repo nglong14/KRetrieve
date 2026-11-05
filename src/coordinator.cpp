@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <exception>
 #include <future>
 #include <queue>
@@ -20,7 +21,7 @@ std::optional<QueryResponse> query_shard(const ShardAddress& shard, uint64_t req
                                          Clock::time_point deadline) {
   try {
     const auto fd = connect_tcp(shard.host, shard.port, deadline);
-    if (!send_all(fd.get(), request)) return std::nullopt;
+    if (!send_all(fd.get(), request, deadline)) return std::nullopt;
     const auto reply = read_frame(fd.get(), deadline);
     if (!reply || reply->type != MsgType::QueryResponse || reply->req_id != req_id) {
       return std::nullopt;
@@ -78,9 +79,13 @@ std::vector<SearchHit> merge_top_k(std::span<const std::vector<SearchHit>> shard
   return out;
 }
 
-Coordinator::Coordinator(std::vector<ShardAddress> shards, size_t pool_threads)
-    : shards_(std::move(shards)), pool_(pool_threads) {
+Coordinator::Coordinator(std::vector<ShardAddress> shards, size_t pool_threads,
+                         std::vector<ShardAddress> replicas)
+    : shards_(std::move(shards)), replicas_(std::move(replicas)), pool_(pool_threads) {
   if (shards_.empty()) throw std::invalid_argument("coordinator needs at least one shard");
+  if (!replicas_.empty() && replicas_.size() != shards_.size()) {
+    throw std::invalid_argument("--replicas must have one address per --shards entry");
+  }
 }
 
 std::optional<Frame> Coordinator::handle(const Frame& request, Clock::time_point received) {
@@ -106,9 +111,24 @@ std::optional<Frame> Coordinator::handle(const Frame& request, Clock::time_point
 
   std::vector<std::future<std::optional<QueryResponse>>> pending;
   pending.reserve(shards_.size());
-  for (const auto& shard : shards_) {
-    pending.push_back(pool_.submit([&shard, req_id, &shard_request, deadline] {
-      return query_shard(shard, req_id, shard_request, deadline);
+  for (size_t i = 0; i < shards_.size(); ++i) {
+    pending.push_back(pool_.submit([this, i, req_id, &shard_request, &query, deadline] {
+      auto response = query_shard(shards_[i], req_id, shard_request, deadline);
+      if (response || replicas_.empty()) return response;
+
+      const auto failed_at = Clock::now();
+      if (failed_at >= deadline) return response;
+      auto retry = *query;
+      retry.budget_us = static_cast<uint64_t>(
+          std::chrono::ceil<std::chrono::microseconds>(deadline - failed_at).count());
+      const auto request = encode_frame({MsgType::QueryRequest, req_id, encode_request(retry)});
+      response = query_shard(replicas_[i], req_id, request, deadline);
+      const auto failover_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - failed_at).count();
+      std::fprintf(stderr, "failover shard=%zu result=%s failover_ms=%.3f\n", i,
+                   response && response->status == ResponseStatus::Ok ? "success" : "failure",
+                   static_cast<double>(failover_us) / 1000.0);
+      return response;
     }));
   }
 

@@ -42,7 +42,7 @@ Fd listen_tcp(const std::string& host, uint16_t port);
 Fd connect_tcp(const std::string& host, uint16_t port, Deadline deadline = {});
 uint16_t local_port(int fd);
 
-bool send_all(int fd, std::span<const uint8_t> data);
+bool send_all(int fd, std::span<const uint8_t> data, Deadline deadline = {});
 
 // nullopt on EOF, I/O error, malformed frame, or deadline expiry.
 std::optional<Frame> read_frame(int fd, Deadline deadline = {});

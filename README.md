@@ -38,7 +38,7 @@ A C++20 BM25 search engine with document shards, a TCP coordinator, deadlines, a
 1. `prepare` assigns each document to `document_id % shard_count` and writes `shard-N.tsv` plus `global_stats.bin`. The output directory must not already exist. Preparation holds the corpus in memory; a failed run may leave partial files.
 2. Each shard builds an immutable inverted index from its partition. **All shards must load the statistics file from that same preparation run.** The artifacts do not carry a corpus identity check.
 3. Search uses BM25 (`k1 = 1.2`, `b = 0.75`) with global document count, document frequency, and average length. Queries match any term; repeated terms count once. Scores sort descending, with document ID ascending on ties.
-4. The coordinator sends a query to every shard, then merges their top K. If a shard fails or misses the deadline, its hits are omitted and its position in `--shards` appears in the incomplete result.
+4. The coordinator sends a query to every shard, then merges their top K. If a shard fails or misses the deadline, its hits are omitted and its position in `--shards` appears in the incomplete result. Optional static replicas recover early transport failures within the same deadline; a slow primary is not retried.
 
 Input is one `unsigned_document_id<TAB>text` per line, with unique IDs. Tokenization lowercases ASCII, splits on non-alphanumeric characters, removes built-in English stopwords, and does not stem. Empty text is allowed; an empty corpus is not.
 
@@ -57,6 +57,8 @@ done
 ```
 
 In another terminal, run `./build/kretrieve query --port 8000 --k 10 --query "cat dog"`.
+
+For crash failover, start one additional shard process per partition with the same `global_stats.bin`, then pass its addresses in matching order with `--replicas host:port,...`. Each primary/replica pair is one logical shard. If a primary connection fails or returns a malformed reply, the coordinator tries its replica once with the same request ID and remaining budget. It logs `failover shard=<index> result=<success|failure> failover_ms=<elapsed>` on stderr. If both fail, the logical index appears once in `missing_shards`. Replication is static and covers crash-stop failures; it does not provide automatic discovery, consensus, or protection from mismatched corpus files.
 
 The coordinator's `--budget-us` defaults to 1 second when the client sends 0; the benchmark uses 200 ms. A missing shard still produces an `Ok` reply with a missing-shard list, which the query CLI prints on stderr. Requests that exhaust their budget while queued, or arrive when the worker pool and queue are full, return `Overloaded`.
 

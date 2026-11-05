@@ -216,6 +216,44 @@ TEST(Coordinator, MismatchedShardReqIdCountsAsMissing) {
   EXPECT_TRUE(response->hits.empty());
 }
 
+TEST(Coordinator, BadPrimaryReplyRetriesReplicaWithSameRequestId) {
+  auto primary_listener = listen_tcp("127.0.0.1", 0);
+  auto replica_listener = listen_tcp("127.0.0.1", 0);
+  const ShardAddress primary{"127.0.0.1", local_port(primary_listener.get())};
+  const ShardAddress replica{"127.0.0.1", local_port(replica_listener.get())};
+  uint64_t primary_id = 0;
+  uint64_t replica_id = 0;
+  uint64_t replica_budget = 0;
+  std::thread bad_primary([&] {
+    const Fd client(accept(primary_listener.get(), nullptr, nullptr));
+    const auto request = read_frame(client.get());
+    ASSERT_TRUE(request);
+    primary_id = request->req_id;
+    send_all(client.get(),
+             encode_frame({MsgType::QueryResponse, primary_id + 1, encode_response({})}));
+  });
+  std::thread good_replica([&] {
+    const Fd client(accept(replica_listener.get(), nullptr, nullptr));
+    const auto request = read_frame(client.get());
+    ASSERT_TRUE(request);
+    replica_id = request->req_id;
+    replica_budget = decode_request(request->body)->budget_us;
+    send_all(client.get(), encode_frame({MsgType::QueryResponse, replica_id,
+                                         encode_response({ResponseStatus::Ok, {{7, 1.0}}, {}})}));
+  });
+  Coordinator coordinator({primary}, 1, {replica});
+  const auto response = ask(coordinator, "cat", 10);
+  bad_primary.join();
+  good_replica.join();
+  ASSERT_TRUE(response);
+  EXPECT_TRUE(response->missing_shards.empty());
+  expect_same_hits(response->hits, {{7, 1.0}});
+  EXPECT_NE(primary_id, 0u);
+  EXPECT_EQ(replica_id, primary_id);
+  EXPECT_GT(replica_budget, 0u);
+  EXPECT_LT(replica_budget, 1'000'000u);
+}
+
 TEST(Coordinator, ConcurrentQueriesThroughTheCoordinatorServer) {
   Cluster cluster;
   Coordinator coordinator(cluster.addresses, 3 * 4);

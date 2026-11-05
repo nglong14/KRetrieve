@@ -32,7 +32,8 @@ std::vector<SearchHit> merge_top_k(std::span<const std::vector<SearchHit>> shard
 class Coordinator {
  public:
   // pool_threads should be at least shards x concurrent queries, so fan-out never queues.
-  Coordinator(std::vector<ShardAddress> shards, size_t pool_threads);
+  Coordinator(std::vector<ShardAddress> shards, size_t pool_threads,
+              std::vector<ShardAddress> replicas = {});
 
   // ponytail: fixed constants; make them flags when someone needs to tune them.
   static constexpr std::chrono::microseconds kDefaultBudget{1'000'000};  // client sent 0
@@ -46,6 +47,7 @@ class Coordinator {
 
  private:
   std::vector<ShardAddress> shards_;
+  std::vector<ShardAddress> replicas_;
   std::atomic<uint64_t> next_req_id_{1};
   ThreadPool pool_;  // last: its destructor joins tasks that read shards_
 };

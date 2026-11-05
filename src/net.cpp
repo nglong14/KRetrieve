@@ -118,10 +118,19 @@ uint16_t local_port(int fd) {
   return ntohs(reinterpret_cast<sockaddr_in*>(&addr)->sin_port);
 }
 
-bool send_all(int fd, std::span<const uint8_t> data) {
+bool send_all(int fd, std::span<const uint8_t> data, Deadline deadline) {
   while (!data.empty()) {
-    const ssize_t sent = send(fd, data.data(), data.size(), MSG_NOSIGNAL);
+    if (deadline) {
+      if (Clock::now() >= *deadline) return false;
+      pollfd pfd{fd, POLLOUT, 0};
+      const int ready = poll(&pfd, 1, remaining_ms(deadline));
+      if (ready < 0 && errno == EINTR) continue;
+      if (ready <= 0 || Clock::now() >= *deadline) return false;
+    }
+    const ssize_t sent =
+        send(fd, data.data(), data.size(), MSG_NOSIGNAL | (deadline ? MSG_DONTWAIT : 0));
     if (sent < 0 && errno == EINTR) continue;
+    if (sent < 0 && errno == EAGAIN && deadline) continue;
     if (sent <= 0) return false;
     data = data.subspan(static_cast<size_t>(sent));
   }
