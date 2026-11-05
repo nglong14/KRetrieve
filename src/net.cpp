@@ -15,9 +15,7 @@
 #include <vector>
 
 namespace kretrieve {
-namespace {
 
-// Milliseconds left, rounded up so we never poll(0) before the deadline; -1 = no deadline.
 int remaining_ms(Deadline deadline) {
   if (!deadline) return -1;
   const auto left = *deadline - Clock::now();
@@ -25,6 +23,8 @@ int remaining_ms(Deadline deadline) {
   const auto ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
   return static_cast<int>(std::min<decltype(ms)>(ms, std::numeric_limits<int>::max()));
 }
+
+namespace {
 
 // Try each resolved address until one binds+listens (server) or connects (client).
 Fd open_tcp(const std::string& host, uint16_t port, bool server, Deadline deadline) {
@@ -118,10 +118,19 @@ uint16_t local_port(int fd) {
   return ntohs(reinterpret_cast<sockaddr_in*>(&addr)->sin_port);
 }
 
-bool send_all(int fd, std::span<const uint8_t> data) {
+bool send_all(int fd, std::span<const uint8_t> data, Deadline deadline) {
   while (!data.empty()) {
-    const ssize_t sent = send(fd, data.data(), data.size(), MSG_NOSIGNAL);
+    if (deadline) {
+      if (Clock::now() >= *deadline) return false;
+      pollfd pfd{fd, POLLOUT, 0};
+      const int ready = poll(&pfd, 1, remaining_ms(deadline));
+      if (ready < 0 && errno == EINTR) continue;
+      if (ready <= 0 || Clock::now() >= *deadline) return false;
+    }
+    const ssize_t sent =
+        send(fd, data.data(), data.size(), MSG_NOSIGNAL | (deadline ? MSG_DONTWAIT : 0));
     if (sent < 0 && errno == EINTR) continue;
+    if (sent < 0 && errno == EAGAIN && deadline) continue;
     if (sent <= 0) return false;
     data = data.subspan(static_cast<size_t>(sent));
   }

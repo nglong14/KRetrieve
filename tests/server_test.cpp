@@ -132,6 +132,22 @@ TEST(ReadFrame, GivesUpAtTheDeadline) {
   EXPECT_LT(waited, std::chrono::seconds(2));
 }
 
+TEST(SendAll, StopsAtDeadlineEvenWhenSocketIsWritable) {
+  int pair[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);
+  const Fd writer(pair[0]);
+  const Fd reader(pair[1]);
+  const std::vector<uint8_t> data(1'000'000, 42);
+
+  EXPECT_FALSE(send_all(writer.get(), data, Clock::now() - std::chrono::milliseconds(1)));
+  pollfd pfd{reader.get(), POLLIN, 0};
+  EXPECT_EQ(poll(&pfd, 1, 0), 0);  // no bytes were sent after expiry
+
+  const auto start = Clock::now();
+  EXPECT_FALSE(send_all(writer.get(), data, start + std::chrono::milliseconds(50)));
+  EXPECT_LT(Clock::now() - start, std::chrono::seconds(2));  // peer never reads
+}
+
 TEST(ReadFrame, ReassemblesSplitWritesAndRejectsOversizedPrefix) {
   int pair[2];
   ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, pair), 0);

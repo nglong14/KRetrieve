@@ -82,6 +82,17 @@ void expect_same_hits(const std::vector<SearchHit>& actual,
   }
 }
 
+// Fake shard: accept one connection, read one request, send `response` for its id.
+// Returns the request id, or 0 if no request arrived.
+uint64_t answer_once(const Fd& listener, const QueryResponse& response) {
+  const Fd client(accept(listener.get(), nullptr, nullptr));
+  const auto request = read_frame(client.get());
+  if (!request) return 0;
+  send_all(client.get(),
+           encode_frame({MsgType::QueryResponse, request->req_id, encode_response(response)}));
+  return request->req_id;
+}
+
 }  // namespace
 
 TEST(MergeTopK, OrdersByScoreThenDocIdAndKeepsK) {
@@ -214,6 +225,95 @@ TEST(Coordinator, MismatchedShardReqIdCountsAsMissing) {
   EXPECT_EQ(response->status, ResponseStatus::Ok);
   EXPECT_EQ(response->missing_shards, (std::vector<uint32_t>{0}));
   EXPECT_TRUE(response->hits.empty());
+}
+
+TEST(Coordinator, BadPrimaryReplyRetriesReplicaWithSameRequestId) {
+  auto primary_listener = listen_tcp("127.0.0.1", 0);
+  auto replica_listener = listen_tcp("127.0.0.1", 0);
+  const ShardAddress primary{"127.0.0.1", local_port(primary_listener.get())};
+  const ShardAddress replica{"127.0.0.1", local_port(replica_listener.get())};
+  uint64_t primary_id = 0;
+  uint64_t replica_id = 0;
+  uint64_t replica_budget = 0;
+  std::thread bad_primary([&] {
+    const Fd client(accept(primary_listener.get(), nullptr, nullptr));
+    const auto request = read_frame(client.get());
+    ASSERT_TRUE(request);
+    primary_id = request->req_id;
+    send_all(client.get(),
+             encode_frame({MsgType::QueryResponse, primary_id + 1, encode_response({})}));
+  });
+  std::thread good_replica([&] {
+    const Fd client(accept(replica_listener.get(), nullptr, nullptr));
+    const auto request = read_frame(client.get());
+    ASSERT_TRUE(request);
+    replica_id = request->req_id;
+    replica_budget = decode_request(request->body)->budget_us;
+    send_all(client.get(), encode_frame({MsgType::QueryResponse, replica_id,
+                                         encode_response({ResponseStatus::Ok, {{7, 1.0}}, {}})}));
+  });
+  Coordinator coordinator({primary}, 1, {replica});
+  const auto response = ask(coordinator, "cat", 10);
+  bad_primary.join();
+  good_replica.join();
+  ASSERT_TRUE(response);
+  EXPECT_TRUE(response->missing_shards.empty());
+  expect_same_hits(response->hits, {{7, 1.0}});
+  EXPECT_NE(primary_id, 0u);
+  EXPECT_EQ(replica_id, primary_id);
+  EXPECT_GT(replica_budget, 0u);
+  EXPECT_LT(replica_budget, 1'000'000u);
+}
+
+TEST(Coordinator, SlowPrimaryIsHedgedToReplicaAndLoserIsClosed) {
+  auto primary_listener = listen_tcp("127.0.0.1", 0);
+  auto replica_listener = listen_tcp("127.0.0.1", 0);
+  const ShardAddress primary{"127.0.0.1", local_port(primary_listener.get())};
+  const ShardAddress replica{"127.0.0.1", local_port(replica_listener.get())};
+  uint64_t primary_id = 0;
+  uint64_t replica_id = 0;
+  std::thread silent_primary([&] {
+    const Fd client(accept(primary_listener.get(), nullptr, nullptr));
+    const auto request = read_frame(client.get());
+    ASSERT_TRUE(request);
+    primary_id = request->req_id;
+    // Never reply: the coordinator must close this losing copy, which ends the read.
+    EXPECT_FALSE(read_frame(client.get()));
+  });
+  std::thread replica_shard(
+      [&] { replica_id = answer_once(replica_listener, {ResponseStatus::Ok, {{7, 1.0}}, {}}); });
+  Coordinator coordinator({primary}, 1, {replica}, std::chrono::milliseconds(20));
+  const auto start = Clock::now();
+  const auto response = ask(coordinator, "cat", 10, 1'000'000);
+  const auto elapsed = Clock::now() - start;
+  silent_primary.join();
+  replica_shard.join();
+  ASSERT_TRUE(response);
+  EXPECT_TRUE(response->missing_shards.empty());
+  expect_same_hits(response->hits, {{7, 1.0}});
+  EXPECT_NE(primary_id, 0u);
+  EXPECT_EQ(replica_id, primary_id);
+  EXPECT_LT(elapsed, std::chrono::milliseconds(500));  // hedged at 20 ms, not the 1 s deadline
+}
+
+TEST(Coordinator, OverloadedPrimaryFallsBackToReplica) {
+  auto primary_listener = listen_tcp("127.0.0.1", 0);
+  auto replica_listener = listen_tcp("127.0.0.1", 0);
+  std::thread primary([&] { answer_once(primary_listener, {ResponseStatus::Overloaded, {}, {}}); });
+  std::thread replica([&] { answer_once(replica_listener, {ResponseStatus::Ok, {{7, 1.0}}, {}}); });
+  Coordinator coordinator({{"127.0.0.1", local_port(primary_listener.get())}}, 1,
+                          {{"127.0.0.1", local_port(replica_listener.get())}});
+  const auto response = ask(coordinator, "cat", 10);
+  primary.join();
+  replica.join();
+  ASSERT_TRUE(response);
+  EXPECT_TRUE(response->missing_shards.empty());
+  expect_same_hits(response->hits, {{7, 1.0}});
+}
+
+TEST(Coordinator, HedgingNeedsReplicas) {
+  EXPECT_THROW(Coordinator({{"127.0.0.1", 1}}, 1, {}, std::chrono::milliseconds(10)),
+               std::invalid_argument);
 }
 
 TEST(Coordinator, ConcurrentQueriesThroughTheCoordinatorServer) {

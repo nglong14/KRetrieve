@@ -26,7 +26,7 @@ void send_one(const LoadConfig& config, Fd& fd, uint64_t req_id, const std::stri
     if (fd.get() < 0) fd = connect_tcp(config.host, config.port, deadline);
     const Frame frame{MsgType::QueryRequest, req_id,
                       encode_request({config.k, config.budget_us, query})};
-    if (send_all(fd.get(), encode_frame(frame))) {
+    if (send_all(fd.get(), encode_frame(frame), deadline)) {
       const auto reply = read_frame(fd.get(), deadline);
       if (reply && reply->type == MsgType::QueryResponse && reply->req_id == req_id) {
         if (const auto response = decode_response(reply->body)) {

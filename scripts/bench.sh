@@ -2,7 +2,8 @@
 # Run a QPS sweep against 3 shards + a coordinator and write one CSV per rate.
 # Usage: scripts/bench.sh <label> [extra shard flags, e.g. --latency-ms 20-100 --latency-prob 0.1]
 # Env: BIN (default build/kretrieve), QPS ("100 250 500 1000 2000 4000"), DURATION (s, 10),
-#      BUDGET_US (200000).
+#      BUDGET_US (200000), HEDGE_MS (unset; set it to add one replica per shard, with the
+#      same shard flags, and hedge to it after that many ms).
 set -euo pipefail
 
 label=${1:?usage: scripts/bench.sh <label> [shard flags...]}
@@ -44,14 +45,26 @@ start() {
   [[ -n $port ]] || { echo "$name did not start" >&2; exit 1; }
 }
 
-shards=()
-for s in 0 1 2; do
-  start "shard$s" shard --stats "$data/prepared/global_stats.bin" \
-    --partition "$data/prepared/shard-$s.tsv" "$@"
-  shards+=("127.0.0.1:$port")
-done
+# start_shards <name> [shard flags...]: start shards 0-2; sets $addrs to "host:port,...".
+start_shards() {
+  local name=$1 list=()
+  shift
+  for s in 0 1 2; do
+    start "$name$s" shard --stats "$data/prepared/global_stats.bin" \
+      --partition "$data/prepared/shard-$s.tsv" "$@"
+    list+=("127.0.0.1:$port")
+  done
+  addrs=$(IFS=,; echo "${list[*]}")
+}
+
+start_shards shard "$@"
+coord_flags=(--shards "$addrs")
+if [[ -n ${HEDGE_MS:-} ]]; then
+  start_shards replica "$@"
+  coord_flags+=(--replicas "$addrs" --hedge-ms "$HEDGE_MS")
+fi
 # Small worker pool and queue so the top rates show Overloaded rather than unbounded waits.
-start coordinator coordinator --workers 8 --max-queue 16 --shards "$(IFS=,; echo "${shards[*]}")"
+start coordinator coordinator --workers 8 --max-queue 16 "${coord_flags[@]}"
 
 for qps in $qps_list; do
   printf '%s qps=%s: ' "$label" "$qps"
