@@ -8,7 +8,7 @@
 
 namespace kretrieve {
 
-// Little-endian KRST v1 format, documented in README.md. The writer replaces
+// Little-endian KRST v1 format. The writer replaces
 // its target file; prepare_corpus calls it only inside a newly created directory.
 // Invalid statistics throw std::invalid_argument; file/format errors throw
 // std::runtime_error (including std::filesystem::filesystem_error).

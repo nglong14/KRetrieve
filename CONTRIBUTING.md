@@ -1,6 +1,6 @@
 # Contributing to KRetrieve
 
-Build and test instructions are in the [README](README.md#build-and-test).
+Build and test instructions are in the [README](README.md#try-it).
 
 ## Formatting and static analysis
 

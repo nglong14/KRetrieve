@@ -2,338 +2,98 @@
 
 [![CI](https://github.com/nglong14/KRetrieve/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nglong14/KRetrieve/actions/workflows/ci.yml)
 
-A C++20 sharded BM25 retrieval engine in progress. An offline `prepare` step
-partitions a corpus and computes global statistics. Each shard serves one
-partition over TCP, and a scatter-gather coordinator fans queries out to every
-shard under a deadline. It merges the top-K from the shards that answer and
-flags the result incomplete when some do not.
+A C++20 BM25 search engine with document shards, a TCP coordinator, deadlines, and bounded queues.
 
-## Build and test
+**Core idea:** every shard uses statistics from the *whole corpus*, so its scores are comparable. The coordinator requests each shard's top K and merges them. A complete reply matches the ranking of one unsharded index; a missed shard is reported as an incomplete reply.
 
-Requirements: a C++20 compiler, CMake, and a POSIX platform. GoogleTest is fetched
-by CMake when tests are enabled, so the first configure needs network access.
+## Try it
 
-```bash
-cmake -S . -B build -DBUILD_TESTING=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
+1. Build and test (C++20, CMake, POSIX; the first test build downloads GoogleTest):
 
-ASan + UBSan use a separate build directory:
+   ```bash
+   cmake -S . -B build -DBUILD_TESTING=ON
+   cmake --build build -j
+   ctest --test-dir build --output-on-failure
+   ```
 
-```bash
-cmake -S . -B build-asan -DBUILD_TESTING=ON -DKRETRIEVE_ASAN=ON
-cmake --build build-asan -j
-ctest --test-dir build-asan --output-on-failure
-```
+2. Prepare three documents, then start one shard:
 
-`-DKRETRIEVE_TSAN=ON` is also available in a separate build; it cannot be combined
-with `KRETRIEVE_ASAN`. CI runs both sanitizer builds. If TSan aborts with
-"unexpected memory mapping", the kernel's address randomization is too high for
-it; run the tests with `setarch "$(uname -m)" -R ctest --test-dir build-tsan`.
+   ```bash
+   printf '10\tcat cat dog\n20\tdog bird\n30\tcat bird bird\n' > corpus.tsv
+   ./build/kretrieve prepare --input corpus.tsv --output prepared --shards 1
+   ./build/kretrieve shard --stats prepared/global_stats.bin \
+     --partition prepared/shard-0.tsv --port 9000
+   ```
 
-Formatting, static analysis, CI checks and the release process are described in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+3. In another terminal, query it:
 
-## Download a release
+   ```bash
+   ./build/kretrieve query --port 9000 --k 10 --query "cat dog"
+   ```
 
-[GitHub Releases](https://github.com/nglong14/KRetrieve/releases) provides the
-`kretrieve-vVERSION-linux-x86_64.tar.gz` archive and `SHA256SUMS`. For example,
-after downloading both assets for `v0.1.0` into the same directory:
+   Expected document order: **10, 20, 30**. `--port 0` selects and prints a free port.
 
-```bash
-sha256sum --check SHA256SUMS
-tar -xzf kretrieve-v0.1.0-linux-x86_64.tar.gz
-./kretrieve-v0.1.0-linux-x86_64/kretrieve prepare \
-  --input corpus.tsv --output prepared --shards 3
-```
+## How retrieval works
 
-The archive contains the tested CLI executable, this README, and
-`BUILD-METADATA.txt` with the version, commit, compiler, build platform, and
-linked-library information. The initial supported runtime is **Ubuntu 24.04
-x86-64**, with its standard glibc and libstdc++ runtime libraries. The executable
-is dynamically linked, not a portable static binary for all Linux distributions.
-The C++ library is not packaged as an installed/exported SDK.
+1. `prepare` assigns each document to `document_id % shard_count` and writes `shard-N.tsv` plus `global_stats.bin`. The output directory must not already exist. Preparation holds the corpus in memory; a failed run may leave partial files.
+2. Each shard builds an immutable inverted index from its partition. **All shards must load the statistics file from that same preparation run.** The artifacts do not carry a corpus identity check.
+3. Search uses BM25 (`k1 = 1.2`, `b = 0.75`) with global document count, document frequency, and average length. Queries match any term; repeated terms count once. Scores sort descending, with document ID ascending on ties.
+4. The coordinator sends a query to every shard, then merges their top K. If a shard fails or misses the deadline, its hits are omitted and its position in `--shards` appears in the incomplete result.
 
-## Prepare a corpus
+Input is one `unsigned_document_id<TAB>text` per line, with unique IDs. Tokenization lowercases ASCII, splits on non-alphanumeric characters, removes built-in English stopwords, and does not stem. Empty text is allowed; an empty corpus is not.
 
-The source format is one document per line:
+## Run three shards
 
-```text
-<unsigned 64-bit document ID><TAB><document text>
-```
-
-IDs must be globally unique. The first tab separates the ID from the text;
-additional tabs are part of the text. Empty text, CRLF, and a final record without
-a newline are accepted. Empty source corpora, blank records, invalid IDs, and
-duplicate IDs are rejected, with line numbers for malformed records.
-
-For a minimal example (the command below writes real tabs):
+Use the example `corpus.tsv` above. Start the shards in the background, then run the coordinator:
 
 ```bash
-printf '10\tcat cat dog\n20\tdog bird\n30\tcat bird bird\n' > corpus.tsv
-./build/kretrieve prepare --input corpus.tsv --output prepared --shards 3
-```
-
-The shard count must be positive. The output directory **must not already
-exist**, and its parent must exist. Preparation validates the full corpus before
-creating output and never overwrites an existing directory or file.
-
-```text
-prepared/
-  global_stats.bin
-  shard-0.tsv
-  shard-1.tsv
-  shard-2.tsv
-```
-
-Partition assignment is `document_id % shard_count`. Each document is written
-exactly once, preserving its parsed ID and text. Empty partitions are written as
-empty files. Input order is preserved within each partition; statistics terms
-are serialized in sorted order for reproducible output.
-
-Preparation currently holds the corpus and statistics in memory. It opens one
-partition output at a time. I/O errors return nonzero and may leave partial
-output; do not use a failed run's directory. Multi-file atomic publication and
-crash durability are not provided. The success summary is printed only after
-all files have been closed successfully.
-
-## Load a partition and search
-
-The C++ library exposes corpus loading, statistics persistence, and search:
-
-```cpp
-#include "index.hpp"
-#include "prepare.hpp"
-
-#include <fstream>
-
-auto stats = kretrieve::read_global_stats("prepared/global_stats.bin");
-std::ifstream partition("prepared/shard-0.tsv");
-auto documents = kretrieve::load_corpus(partition, /*allow_empty=*/true);
-const kretrieve::InvertedIndex index(documents, stats);
-auto hits = index.search("cat dog", 10);
-```
-
-Each shard must load the **same `global_stats.bin` from the same preparation
-run as its partition**. Global document count, document frequencies, and average
-length make scores directly comparable between shards. Local term frequencies
-and document lengths come from each partition. No coordinator re-ranking is
-needed. Artifacts do not contain a corpus identity/checksum; callers must not mix
-files from different runs.
-
-The index owns its statistics and indexed metadata, and does not retain document
-text. Searches use query-local scratch storage and do not mutate the index.
-
-### Ranking contract
-
-- Tokenization lowercases ASCII, splits on non-alphanumeric characters, removes
-  the built-in English stopwords, and does not stem.
-- Document length counts tokens after stopword removal. Empty-token documents
-  still count toward global `N`; an all-empty-token corpus has `avgdl = 0` and
-  returns no search hits.
-- Queries use the same tokenizer, with distinct terms processed in sorted order.
-- Matching is OR-based; unknown terms are ignored and repeated query terms do
-  not multiply scores. Empty queries and `K = 0` return no hits.
-- Results are ordered by score descending, then document ID ascending for exact
-  score ties. Scores and average document length use `double`.
-
-BM25 uses `k1 = 1.2`, `b = 0.75`, and natural logarithms:
-
-```text
-IDF(t) = ln(1 + (N - df(t) + 0.5) / (df(t) + 0.5))
-
-score(d, q) = sum over distinct query terms t of:
-  IDF(t) * tf(t,d) * (k1 + 1)
-  / (tf(t,d) + k1 * (1 - b + b * length(d) / avgdl))
-```
-
-For the example corpus, `N = 3`, `avgdl = 8/3`, and every term has `df = 2`.
-Searching the full corpus for `cat dog` produces:
-
-| Rank | Document ID | Score |
-|---|---:|---:|
-| 1 | 10 | 1.071445295349 |
-| 2 | 20 | 0.523548346502 |
-| 3 | 30 | 0.447138587823 |
-
-Tests also prepare/load files, search each partition, and merge its top-K in test
-code to verify the same ranking and scores across shard counts, including empty
-partitions and cross-shard ties. The coordinator (below) does this merge over TCP.
-
-### `global_stats.bin` format (version 1)
-
-All integers are unsigned and little-endian. Floating-point values are IEEE-754
-binary64, encoded as little-endian bits. This offline format is separate from
-TCP protocol frames.
-
-| Field | Encoding |
-|---|---|
-| Magic | 4 literal bytes: `KRST` |
-| Version | `u32`, currently `1` |
-| Global document count | `u64` |
-| Average document length | `f64` |
-| Vocabulary size | `u64` |
-| Each term, in sorted order | `u32` byte length, term bytes, `u64` document frequency |
-
-The reader rejects bad magic/version, truncation, invalid lengths, duplicate
-terms, trailing bytes, nonfinite/negative average lengths, inconsistent empty
-vocabularies, zero document counts, and document frequencies outside `1..N`.
-Encoded lengths are checked against the remaining file data before allocation.
-
-## Serve a shard
-
-```bash
-./build/kretrieve prepare --input corpus.tsv --output prepared --shards 1
-./build/kretrieve shard --stats prepared/global_stats.bin \
-  --partition prepared/shard-0.tsv --port 0
-# listening on 127.0.0.1:41237
-./build/kretrieve query --port 41237 --k 10 --query "cat dog"
-# 1	10	1.071445295349
-# 2	20	0.523548346502
-# 3	30	0.447138587823
-```
-
-`--port 0` picks a free port and prints it. `--host` defaults to `127.0.0.1`.
-SIGINT/SIGTERM stop accepting, close client connections, join all workers, and
-exit 0. Queued requests are dropped; already executing searches finish before exit.
-
-**The shard has no authentication or encryption.** Keep it on loopback or a
-trusted network.
-
-The Linux server uses one level-triggered epoll event loop for nonblocking socket
-I/O and a fixed query worker pool. `--workers N` sets the pool size; by default it
-is the CPU count (at least one), capped at `--max-connections` (default 64).
-Workers share the immutable index without locks and never access client sockets.
-Idle clients and slow readers do not occupy a worker.
-
-Connections are persistent and handle one request at a time, in order, including
-pipelined requests. Reading pauses until the current response has been written.
-**Backpressure:** at most `--workers` requests run and at most `--max-queue`
-(default 16) wait for a worker. A request that arrives when both are full gets an
-immediate `Overloaded` reply from the I/O loop, and its connection stays open.
-Fast rejection keeps latency bounded under overload instead of letting a queue
-grow. Each connection holds at most one request or response,
-so memory scales with the connection cap and the 16 MiB maximum frame body.
-Extra connections are accepted and closed immediately. Descriptor exhaustion
-temporarily pauses accepting while existing connections continue to be served.
-
-The server records when it reads each request. A shard drops a request whose
-`budget_us` has run out by the time a worker picks it up: it closes the
-connection without replying, because the coordinator has already stopped
-waiting. A `budget_us` of 0 means no deadline. There is no idle timeout: an idle
-client holds its connection slot until it disconnects.
-
-For experiments, `--latency-ms A-B --latency-prob P` makes a shard sleep a
-random A–B ms before a fraction P of its searches (P defaults to 1; `--latency-ms A`
-means exactly A). The sleep holds a worker, like a slow disk would.
-
-### Message bodies
-
-Both bodies use the frame format in `protocol.hpp`
-(`[u32 len][u8 version][u8 type][u64 req_id][body]`), little-endian. The
-response echoes the request's `req_id`.
-
-| Message | Body |
-|---|---|
-| `QueryRequest` (type 1) | `u32 k` (≤ 100000), `u64 budget_us`, `u32 query_len`, query bytes |
-| `QueryResponse` (type 2) | `u8 status`, `u32 hit_count`, then per hit `u64 doc_id`, `f64 score`, then `u32 missing_count`, then per missing shard `u32 shard_index` |
-
-Status is `0` Ok, `1` BadRequest, `2` InternalError, `3` Overloaded (the
-server's queue was full, or the request's budget ran out while it waited). Hits follow the ranking
-contract above. `budget_us` is the time budget in microseconds (see the
-coordinator section). A non-empty missing-shard list means the result is
-incomplete; shards always send an empty list.
-
-A well-framed request with a malformed body gets `BadRequest`, and the
-connection stays open. An invalid frame (bad length, version, or type) or a
-client-sent `QueryResponse` closes the connection.
-
-## Run a coordinator
-
-```bash
-./build/kretrieve prepare --input corpus.tsv --output prepared --shards 3
+./build/kretrieve prepare --input corpus.tsv --output prepared-3 --shards 3
 for s in 0 1 2; do
-  ./build/kretrieve shard --stats prepared/global_stats.bin \
-    --partition prepared/shard-$s.tsv --port $((9000 + s)) &
+  ./build/kretrieve shard --stats prepared-3/global_stats.bin \
+    --partition prepared-3/shard-$s.tsv --port $((9001 + s)) &
 done
 ./build/kretrieve coordinator --port 8000 \
-  --shards 127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002
-./build/kretrieve query --port 8000 --k 10 --query "cat dog"
-# same output as the single-shard example above
+  --shards 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003
 ```
 
-The coordinator speaks the same protocol as a shard, so `query` works against
-either. It reuses the shard's epoll front end (`--host`, `--max-connections`,
-`--workers`, `--max-queue` mean the same thing). For each query it:
+In another terminal, run `./build/kretrieve query --port 8000 --k 10 --query "cat dog"`.
 
-1. assigns its own `req_id` (an atomic counter) and sends it to every shard;
-   a reply with any other `req_id` counts as a failed shard. The client's own
-   `req_id` is echoed back to the client.
-2. sets a deadline of receive time + `budget_us` (0 means a 1-second default;
-   budgets are capped at 60 seconds) and forwards the remaining budget to each
-   shard. If the budget already ran out while the request was queued, it
-   replies `Overloaded` without contacting any shard.
-3. fans out through a fixed thread pool of `shards × workers` threads, so a
-   full set of workers never waits for a fan-out thread. Each task opens a new
-   TCP connection, sends the request, and reads the reply. Connecting and
-   reading both stop at the deadline. The task then closes its socket, which
-   cancels the shard request.
-4. merges per-shard top-K with a size-K min-heap using the same ranking
-   contract (score desc, document ID asc), so results match an unsharded index.
+The coordinator's `--budget-us` defaults to 1 second when the client sends 0; the benchmark uses 200 ms. A missing shard still produces an `Ok` reply with a missing-shard list, which the query CLI prints on stderr. Requests that exhaust their budget while queued, or arrive when the worker pool and queue are full, return `Overloaded`.
 
-A shard that fails (connect refused, closed connection, mismatched reply,
-non-Ok status) or misses the deadline is left out. The reply is still `Ok`,
-carries the other shards' hits, and lists the missing shards by their position in
-`--shards`. The `query` CLI prints such a result as usual and adds
-`incomplete: missing shards 1,2` on stderr:
-
-```bash
-./build/kretrieve query --port 8000 --k 10 --query "cat dog" --budget-us 200000
-# incomplete: missing shards 1    (stderr, when shard 1 is down or too slow)
-```
-
-The failure model is crash-stop: a shard either answers correctly or does not
-answer in time. Replicas and hedged requests are planned next.
+The Linux server uses epoll for socket I/O and a fixed worker pool for search. Defaults are 64 maximum connections and 16 queued requests. Shards have no authentication or encryption: use loopback or a trusted network. The wire format is defined in [src/protocol.hpp](src/protocol.hpp).
 
 ## Benchmarks
 
-`kretrieve loadgen` is an open-loop load generator. Request *i* is scheduled at
-`i / qps` seconds whether or not earlier requests have finished. Latency is
-measured from that *scheduled* time, so time spent waiting for a free connection
-counts (no coordinated omission). It writes one CSV row per request
-(`seq,due_us,latency_us,status,missing,hits`) and prints a summary:
+The sweep uses a seeded synthetic corpus (100,000 documents), three shards, an 8-worker coordinator with a 16-request queue, and 10 seconds per offered rate. The `slow` run adds 20–100 ms to 10% of searches **on each shard**. All processes run on one machine.
 
-```bash
-./build/kretrieve loadgen --port 8000 --qps 500 --duration 10 \
-  --queries bench/data/queries.txt --budget-us 200000 --out run.csv
-# loadgen: sent=5000 ok=5000 incomplete=0 overloaded=0 errors=0 ok p50=4.76ms ...
-```
+| Run | Offered QPS | p99 of `Ok` replies | Overloaded |
+|---|---:|---:|---:|
+| Baseline | 250 | 8.88 ms | 0% |
+| Baseline | 500 | 34.59 ms | 0% |
+| Baseline | 1,000 | 46.43 ms | 22.15% |
+| Slow | 100 | 101.29 ms | 0% |
+| Slow | 500 | 150.72 ms | 22.8% |
 
-`scripts/bench.sh` runs a full sweep. It generates a seeded synthetic corpus
-(100k documents with a Zipf-distributed vocabulary, via `scripts/gen_corpus.py`),
-prepares 3 shards, starts the shards and a coordinator (`--workers 8
---max-queue 16`), and runs `loadgen` at each rate:
+**Read p99 with the overload rate.** The load generator schedules requests at the offered QPS and measures latency from each scheduled time, including client-side wait. Percentiles include only `Ok` replies; overload percentages include *all* requests. At 1,000 offered QPS, baseline serves 7,785 of 10,000 requests. By 4,000 offered QPS, it serves 7,301 and rejects 81.75%: successful throughput has levelled off while rejection grows.
 
-```bash
-scripts/bench.sh baseline
-scripts/bench.sh slow --latency-ms 20-100 --latency-prob 0.1   # flags go to every shard
-python3 -m venv .venv && .venv/bin/pip install -r scripts/requirements.txt
-.venv/bin/python scripts/plot.py   # writes bench/latency.png and bench/summary.csv
-```
+**Slow shards drive the tail.** A complete query waits for its slowest shard. The injected delay raises p99 even at 100 QPS and causes overload at 500 QPS. These runs show latency and load shedding; they do not measure search relevance or shard-failure recovery. Treat the numbers as comparisons for this machine, not production capacity.
 
 ![Latency and failure rate against offered load](bench/latency.png)
 
-Percentiles cover `Ok` replies only, because shed requests return almost
-instantly and would hide the tail. With no injected latency, p99 stays near
-10 ms up to 250 queries/s. Between 500 and 1000 queries/s the coordinator starts to shed load
-as `Overloaded`, and latency stays bounded instead of growing with the queue.
-When 10% of shard searches take an extra 20–100 ms, p99 rises to about 100 ms
-even at low load: each query waits for its slowest shard. Hedged requests target
-exactly this tail. All processes share one machine, so treat the numbers as
-relative; exact data is in `bench/summary.csv`.
+Run the sweep and rebuild the chart:
 
-## Non-goals
+```bash
+scripts/bench.sh baseline
+scripts/bench.sh slow --latency-ms 20-100 --latency-prob 0.1
+python3 -m venv .venv
+.venv/bin/pip install -r scripts/requirements.txt
+.venv/bin/python scripts/plot.py
+```
 
-WAND/MaxScore, term-based partitioning, consensus/multi-writer replication,
-service discovery, nDCG tuning, and stemming are outside the planned scope.
+Results: [bench/summary.csv](bench/summary.csv) and one row per request in `bench/results/` (`seq,due_us,latency_us,status,missing,hits`).
+
+## Build and release notes
+
+CI runs normal, ASan/UBSan, and TSan builds. Use separate build directories with `-DKRETRIEVE_ASAN=ON` or `-DKRETRIEVE_TSAN=ON`; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+[GitHub Releases](https://github.com/nglong14/KRetrieve/releases) provides the executable archive and `SHA256SUMS`. The initial supported runtime is **Ubuntu 24.04 x86-64** with standard glibc and libstdc++; the C++ library is not packaged as an SDK.
