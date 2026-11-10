@@ -111,6 +111,53 @@ python3 -m venv .venv
 
 Results: [bench/summary.csv](bench/summary.csv) and one row per request in `bench/results/` (`seq,due_us,latency_us,status,missing,hits`).
 
+## Run with Docker
+
+One image runs every role. Data is not baked in: mount the output of `prepare` at `/data`.
+
+```bash
+cd deploy
+mkdir -p data && cp ../bench/data/corpus.tsv data/   # or any id<TAB>text corpus
+docker compose run --rm prepare                      # once; fails if data/prepared exists
+docker compose up --build -d                         # 3 shards + 3 replicas + coordinator
+docker compose run --rm --no-deps query query --host coordinator --port 8000 --query "cat dog"
+```
+
+Use `--no-deps` when testing failures: without it, `docker compose run` restarts any stopped dependency. Only the coordinator port is published, on loopback. Shard ports carry no authentication or encryption.
+
+## Cloud deployment (Azure)
+
+`deploy/terraform/` creates a VNet, three VMs and an NSG that allows SSH from one IP only. Shard, replica and coordinator ports are reachable only inside the VNet. Every VM shuts down daily at 23:00 UTC as a safety net, and `terraform destroy` removes everything.
+
+```bash
+cd deploy/terraform && export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+terraform apply -var allowed_ssh_cidr=$(curl -4 -s https://ifconfig.me)/32
+cd ../..
+scripts/cloud_cluster.sh images && scripts/cloud_cluster.sh data   # image + shards; checks global_stats.bin hashes match
+scripts/remote_bench.sh cloud-baseline                              # also: cloud-slow, HEDGE_MS=10 cloud-hedged
+scripts/remote_chaos.sh                                             # MODE=vm deallocates a whole shard VM
+python3 scripts/plot.py bench/cloud
+```
+
+**Setup measured.** Japan East, one zone. One control VM (coordinator and load generator, `Standard_D2ds_v4`) and two shard VMs (`Standard_D2s_v4`), all 2 vCPU. The same 100,000-document corpus and 3 logical shards as above; each primary and its replica are on different VMs. Containers use host networking. Replicas run only in the hedged and chaos runs. Each benchmark was run once. The VM size is small because the subscription had a 6-vCPU quota.
+
+| Run | Offered QPS | p95 of `Ok` replies | p99 of `Ok` replies | Overloaded |
+|---|---:|---:|---:|---:|
+| Baseline | 100 | 8.29 ms | 12.03 ms | 0% |
+| Baseline | 250 | 15.55 ms | 20.25 ms | 0% |
+| Baseline | 500 | 87.45 ms | 107.52 ms | 30.82% |
+| Baseline | 1,000 | 89.06 ms | 109.48 ms | 65.1% |
+| Slow | 100 | 96.13 ms | 104.87 ms | 0% |
+| Slow | 250 | 200.56 ms | 201.15 ms | 30.48% |
+| Hedged | 100 | 46.13 ms | 81.35 ms | 0% |
+| Hedged | 250 | 168.95 ms | 200.59 ms | 22.24% |
+
+Run details are in `bench/cloud/results/*.meta`; chart and summary are `bench/cloud/latency.png` and `bench/cloud/summary.csv`.
+
+**Compared with one machine.** Baseline tail latency at 250 QPS is about twice as high (p95 15.55 vs 8.07 ms), and load shedding starts near 500 QPS instead of near 1,000. The cloud VMs have only 2 vCPUs each, each shard VM runs several processes, and the load generator shares the control VM with the coordinator. Hedging still lowers the tail at 100 QPS (p95 96 to 46 ms, p99 105 to 81 ms) but by less than on one machine, and at 250 QPS the cluster is already overloaded. I have not isolated why: replicas sharing VMs with primaries and injected delays holding worker threads are both candidates. Percentiles near 200 ms are the request budget, not service time, and past saturation p50 mostly measures queueing.
+
+**Chaos run.** `scripts/remote_chaos.sh` ran 60 seconds at 200 QPS and `docker kill`ed a random shard or replica 5 times. All 12,000 requests returned `Ok`, 4 of them incomplete (0.03%). p50 5.65 ms, p95 21.68 ms, p99 47.25 ms, max 205.61 ms. The coordinator logged 3,708 failovers, roughly 3.7 s per kill, which is about the time a restarted shard needs to rebuild its index. This is a much shorter run than the 10-minute local one, so don't compare the two. Whole-VM failure (`MODE=vm`) has not been run.
+
 ## Build and release notes
 
 CI runs normal, ASan/UBSan, and TSan builds. Use separate build directories with `-DKRETRIEVE_ASAN=ON` or `-DKRETRIEVE_TSAN=ON`; see [CONTRIBUTING.md](CONTRIBUTING.md).

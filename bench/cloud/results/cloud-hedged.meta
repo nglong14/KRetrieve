@@ -1,0 +1,10 @@
+date 2026-11-10T22:12:54Z
+label cloud-hedged
+shard_flags --latency-ms 20-100 --latency-prob 0.1
+hedge_ms 10
+shards 10.0.1.20:9000,10.0.1.21:9001,10.0.1.20:9002
+replicas 10.0.1.21:9100,10.0.1.20:9101,10.0.1.21:9102
+vm_size Standard_D2ds_v4 location japaneast zone 1
+kernel 7.0.0-1017-azure
+Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+image sha256:f699acac00d0c869d269e8f6c9abfab1db82f9f901c25dd63ff33e9e7ef77865

@@ -217,3 +217,32 @@ jobs:
             "dist/kretrieve-${VERSION}-linux-x86_64.tar.gz" dist/SHA256SUMS \
             --verify-tag --generate-notes --draft "${args[@]}"
           gh release edit "$VERSION" --draft=false
+
+  image:
+    name: image
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and push image to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image:$VERSION" .
+          docker push "$image:$VERSION"
+          # Release candidates must not move `latest`.
+          if [[ "$VERSION" != *-rc.* ]]; then
+            docker tag "$image:$VERSION" "$image:latest"
+            docker push "$image:latest"
+          fi

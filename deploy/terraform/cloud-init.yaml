@@ -1,0 +1,10 @@
+#cloud-config
+# Installs Docker and pre-pulls the KRetrieve image. Containers are started later by the remote scripts.
+package_update: true
+packages:
+  - docker.io
+  - iproute2
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker azureuser
+  - docker pull ${image} || true
