@@ -17,3 +17,6 @@ docs/
 bench/data/
 bench/results/
 .venv/
+
+# Local docker-compose data (corpus and prepared shards)
+deploy/data/

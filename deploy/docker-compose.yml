@@ -1,0 +1,74 @@
+# Local 3-shard cluster with one replica per shard.
+#   cd deploy
+#   mkdir -p data && printf '10\tcat cat dog\n20\tdog bird\n30\tcat bird bird\n' > data/corpus.tsv
+#   docker compose run --rm prepare          # once; fails if data/prepared already exists
+#   docker compose up --build -d
+#   docker compose run --rm query --host coordinator --port 8000 --k 10 --query "cat dog"
+# Shards have no authentication or TLS: only the coordinator port is published, on loopback.
+
+x-shard: &shard
+  build: ..
+  image: kretrieve
+  volumes: ["./data:/data:ro"]
+  healthcheck:
+    # Image has no nc/curl; bash's /dev/tcp is enough. The index is built before the port opens.
+    test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/9000"]
+    interval: 2s
+    timeout: 2s
+    retries: 15
+    start_period: 10s
+
+services:
+  prepare:
+    build: ..
+    image: kretrieve
+    profiles: ["tools"]
+    volumes: ["./data:/data"]
+    command: ["prepare", "--input", "/data/corpus.tsv", "--output", "/data/prepared", "--shards", "3"]
+
+  shard0:
+    <<: *shard
+    command: [shard, --stats, /data/prepared/global_stats.bin, --host, 0.0.0.0, --port, "9000", --partition, /data/prepared/shard-0.tsv]
+  shard1:
+    <<: *shard
+    command: [shard, --stats, /data/prepared/global_stats.bin, --host, 0.0.0.0, --port, "9000", --partition, /data/prepared/shard-1.tsv]
+  shard2:
+    <<: *shard
+    command: [shard, --stats, /data/prepared/global_stats.bin, --host, 0.0.0.0, --port, "9000", --partition, /data/prepared/shard-2.tsv]
+  replica0:
+    <<: *shard
+    command: [shard, --stats, /data/prepared/global_stats.bin, --host, 0.0.0.0, --port, "9000", --partition, /data/prepared/shard-0.tsv]
+  replica1:
+    <<: *shard
+    command: [shard, --stats, /data/prepared/global_stats.bin, --host, 0.0.0.0, --port, "9000", --partition, /data/prepared/shard-1.tsv]
+  replica2:
+    <<: *shard
+    command: [shard, --stats, /data/prepared/global_stats.bin, --host, 0.0.0.0, --port, "9000", --partition, /data/prepared/shard-2.tsv]
+
+  coordinator:
+    build: ..
+    image: kretrieve
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      shard0: {condition: service_healthy}
+      shard1: {condition: service_healthy}
+      shard2: {condition: service_healthy}
+      replica0: {condition: service_healthy}
+      replica1: {condition: service_healthy}
+      replica2: {condition: service_healthy}
+    command:
+      - coordinator
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --shards
+      - shard0:9000,shard1:9000,shard2:9000
+      - --replicas
+      - replica0:9000,replica1:9000,replica2:9000
+
+  query:
+    build: ..
+    image: kretrieve
+    profiles: ["tools"]
+    depends_on: [coordinator]
