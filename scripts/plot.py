@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Plot latency percentiles and failure rates from bench/results/<label>-<qps>.csv.
+"""Plot latency percentiles and failure rates from <dir>/results/<label>-<qps>.csv.
 
-Writes bench/latency.png and bench/summary.csv.
+Usage: scripts/plot.py [dir]   (default dir: bench; cloud runs use bench/cloud)
+Writes <dir>/latency.png and <dir>/summary.csv.
 """
 
 import csv
 import glob
 import math
 import os
+import sys
 from collections import defaultdict
 
 import matplotlib
@@ -53,15 +55,16 @@ def summarize(path):
 
 
 def main():
+    root = sys.argv[1] if len(sys.argv) > 1 else "bench"
     os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     runs = defaultdict(dict)  # label -> qps -> summary
-    for path in glob.glob("bench/results/*.csv"):
+    for path in glob.glob(f"{root}/results/*.csv"):
         label, qps = os.path.basename(path)[: -len(".csv")].rsplit("-", 1)
         runs[label][int(qps)] = summarize(path)
     if not runs:
-        raise SystemExit("no bench/results/*.csv; run scripts/bench.sh first")
+        raise SystemExit(f"no {root}/results/*.csv; run scripts/bench.sh or scripts/remote_bench.sh first")
 
-    with open("bench/summary.csv", "w", newline="") as f:
+    with open(f"{root}/summary.csv", "w", newline="") as f:
         fields = ["label", "qps", "samples", "p50_ms", "p95_ms", "p99_ms",
                   "incomplete_pct", "overloaded_pct", "error_pct"]
         writer = csv.DictWriter(f, fieldnames=fields, lineterminator="\n")
@@ -90,8 +93,8 @@ def main():
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig("bench/latency.png", dpi=120)
-    print("wrote bench/latency.png and bench/summary.csv")
+    fig.savefig(f"{root}/latency.png", dpi=120)
+    print(f"wrote {root}/latency.png and {root}/summary.csv")
 
 
 if __name__ == "__main__":
