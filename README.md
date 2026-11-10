@@ -62,6 +62,8 @@ For crash failover, start one additional shard process per partition with the sa
 
 To cut tail latency, add `--hedge-ms <N>` (requires `--replicas`). If a primary has not replied after N ms, the coordinator sends the same request to the replica and uses the first `Ok` reply. It then closes the other connection. Each logical shard gets at most one extra request per query. Every hedge costs one extra search on a replica, and the delay is fixed rather than adaptive. Pick N near the shard's normal p95, and expect hedging to add load when shards are already saturated.
 
+`scripts/chaos.sh` runs three shards with replicas under load, repeatedly `kill -9`s a random shard process and restarts it on the same port, and fails if the coordinator or load generator dies or a sanitizer reports. Set `BIN` to a TSan/ASan build to hunt races (`DURATION`, `QPS`, `INTERVAL`, `DOWN`, `SEED` also apply).
+
 The coordinator's `--budget-us` defaults to 1 second when the client sends 0; the benchmark uses 200 ms. A missing shard still produces an `Ok` reply with a missing-shard list, which the query CLI prints on stderr. Requests that exhaust their budget while queued, or arrive when the worker pool and queue are full, return `Overloaded`.
 
 The Linux server uses epoll for socket I/O and a fixed worker pool for search. Defaults are 64 maximum connections and 16 queued requests. Shards have no authentication or encryption: use loopback or a trusted network. The wire format is defined in [src/protocol.hpp](src/protocol.hpp).
@@ -87,6 +89,8 @@ The sweep uses a seeded synthetic corpus (100,000 documents), three shards, an 8
 **Slow shards drive the tail.** A complete query waits for its slowest shard. The injected delay raises p99 even at 100 QPS and causes overload at 500 QPS. These runs show latency and load shedding; they do not measure search relevance or shard-failure recovery.
 
 **Hedging trims the tail.** At 100–250 QPS, hedging cuts p95 from about 90 ms to 18 ms and p99 from 103 ms to 54–65 ms. p99 does not return to baseline: both copies of a shard are slow 1% of the time, so about 3% of queries still hit a slow pair. Past saturation, hedged requests compete with normal ones, so the gain shrinks. Treat the numbers as comparisons for this machine, not production capacity.
+
+**Chaos run.** `DURATION=600 INTERVAL=5 scripts/chaos.sh` ran 10 minutes at 200 QPS with a replica per shard. It `kill -9`'d a random shard process 79 times, restarting each after 1 s. All 120,000 requests returned `Ok` and complete (no incomplete, overloaded or errored replies); p50 4.43 ms, p95 7.41 ms, p99 10.36 ms, max 211.57 ms. The coordinator logged 23,158 failovers, and no process crashed. This ran on a normal build; the TSan build was only run for 15 s, so a long sanitizer run is still open.
 
 ![Latency and failure rate against offered load](bench/latency.png)
 
