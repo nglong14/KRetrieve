@@ -90,6 +90,8 @@ The sweep uses a seeded synthetic corpus (100,000 documents), three shards, an 8
 
 **Hedging trims the tail.** At 100–250 QPS, hedging cuts p95 from about 90 ms to 18 ms and p99 from 103 ms to 54–65 ms. p99 does not return to baseline: both copies of a shard are slow 1% of the time, so about 3% of queries still hit a slow pair. Past saturation, hedged requests compete with normal ones, so the gain shrinks. Treat the numbers as comparisons for this machine, not production capacity.
 
+**Chaos run.** `DURATION=600 INTERVAL=5 scripts/chaos.sh` ran 10 minutes at 200 QPS with a replica per shard. It `kill -9`'d a random shard process 79 times, restarting each after 1 s. All 120,000 requests returned `Ok` and complete (no incomplete, overloaded or errored replies); p50 4.43 ms, p95 7.41 ms, p99 10.36 ms, max 211.57 ms. The coordinator logged 23,158 failovers, and no process crashed. This ran on a normal build; the TSan build was only run for 15 s, so a long sanitizer run is still open.
+
 ![Latency and failure rate against offered load](bench/latency.png)
 
 Run the sweep and rebuild the chart:
