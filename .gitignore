@@ -20,3 +20,12 @@ bench/results/
 
 # Local docker-compose data (corpus and prepared shards)
 deploy/data/
+
+# Terraform local state and cache (state can contain secrets)
+deploy/terraform/.terraform/
+*.tfstate*
+deploy/terraform/*.tfvars
+
+# Raw per-request cloud results (bench/cloud/summary.csv, latency.png and *.meta are committed)
+bench/cloud/results/*.csv
+bench/cloud/chaos-*.csv
