@@ -6,6 +6,10 @@ A C++20 BM25 search engine with document shards, a TCP coordinator, deadlines, a
 
 **Core idea:** every shard uses statistics from the *whole corpus*, so its scores are comparable. The coordinator requests each shard's top K and merges them. A complete reply matches the ranking of one unsharded index; a missed shard is reported as an incomplete reply.
 
+![Demo: kill -9 a shard, partial result, then replica failover](bench/demo.gif)
+
+Run it yourself with `./run_demo.sh`.
+
 ## Try it
 
 1. Build and test (C++20, CMake, POSIX; the first test build downloads GoogleTest):
